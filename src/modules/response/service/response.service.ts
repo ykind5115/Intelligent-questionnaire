@@ -30,6 +30,7 @@ import {
 import {
   questionnaireSchema,
   type QuestionnaireSchema,
+  type QuestionType,
 } from "../../questionnaire/schema/questionnaire.schema.js";
 import type { ServiceContext } from "../../questionnaire/service/questionnaire.service.js";
 
@@ -144,10 +145,21 @@ function parseSchema(raw: unknown, subject: string): QuestionnaireSchema {
  * 但结构里保留了 children，因此这里递归处理，
  * 避免将来打开嵌套时漏掉子分组的题目。
  */
+/**
+ * 拍平问卷里所有问题。
+ *
+ * 返回 type 是必需的：保存答案时要按题型校验答案形状
+ * （05 文档第 15.4 节）。
+ */
 function collectQuestions(
   schema: QuestionnaireSchema
-): { id: string; required: boolean; title: string }[] {
-  const out: { id: string; required: boolean; title: string }[] = [];
+): { id: string; required: boolean; title: string; type: QuestionType }[] {
+  const out: {
+    id: string;
+    required: boolean;
+    title: string;
+    type: QuestionType;
+  }[] = [];
 
   const walk = (
     sections: QuestionnaireSchema["sections"]
@@ -158,6 +170,7 @@ function collectQuestions(
           id: question.id,
           required: question.required,
           title: question.title,
+          type: question.type,
         });
       }
       if (section.children && section.children.length > 0) {
@@ -170,11 +183,96 @@ function collectQuestions(
   return out;
 }
 
-/** 「没填」的判定：缺行、null、空串、空数组都算未填 */
+/**
+ * 题型与答案形状的一致性校验（05 文档第 15.4 节）。
+ *
+ * 早期实现完全不校验：text 题可以写入对象、boolean 题可以写入字符串，
+ * 脏数据进 JSONB 后要到审核或统计阶段才暴露。
+ *
+ * 注意：这里**不做业务语义校验**（例如选项是否在 options 内），
+ * 只做「形状」校验，避免对前端过于苛刻（例如后端改了选项后旧答案仍应可保存）。
+ */
+function assertAnswerShape(
+  question: { id: string; type: QuestionType },
+  answer: unknown,
+  questionId: string
+): void {
+  const fail = (expected: string): never => {
+    throw validationError(
+      `问题 ${questionId} 的题型为 ${question.type}，答案应为 ${expected}`,
+      { path: "answer", questionId, questionType: question.type }
+    );
+  };
+
+  switch (question.type) {
+    case "text":
+    case "textarea":
+      if (typeof answer !== "string") fail("字符串");
+      return;
+
+    case "number":
+      if (typeof answer !== "number" || Number.isNaN(answer)) fail("数字");
+      return;
+
+    case "boolean":
+      if (typeof answer !== "boolean") fail("布尔值（true/false）");
+      return;
+
+    case "date":
+    case "datetime":
+      // 用字符串承载（ISO 格式），不在此处严格校验日期格式
+      if (typeof answer !== "string") fail("日期字符串");
+      return;
+
+    case "single_choice":
+      if (typeof answer !== "string") fail("单个选项值（字符串）");
+      return;
+
+    case "multiple_choice":
+      if (
+        !Array.isArray(answer) ||
+        answer.some((v) => typeof v !== "string")
+      ) {
+        fail("选项值数组（字符串数组）");
+      }
+      return;
+
+    default: {
+      // 穷尽性检查：新增题型时这里会编译报错
+      const never: never = question.type;
+      throw validationError(`未知题型：${String(never)}`, {
+        path: "questionType",
+        questionId,
+      });
+    }
+  }
+}
+
+/** 「没填」的判定。
+ *
+ * 覆盖：缺行、null、undefined、空串/纯空白串、空数组、
+ *       **空对象**、以及**数组里全是空值**（例如 [null]、[""]）。
+ *
+ * 为什么要把后两种也算作未填：
+ *   早期实现只判到空数组，于是 `{}` 与 `[null]` 会被当成「已填」，
+ *   必填校验形同虚设，脏数据一路流到审核环节。
+ */
 function isBlankAnswer(answer: unknown): boolean {
   if (answer === null || answer === undefined) return true;
   if (typeof answer === "string") return answer.trim() === "";
-  if (Array.isArray(answer)) return answer.length === 0;
+
+  if (Array.isArray(answer)) {
+    if (answer.length === 0) return true;
+    // 数组里所有元素都是空值 → 视为未填（例如 [null]、[""]、[[],{}]）
+    return answer.every((item) => isBlankAnswer(item));
+  }
+
+  if (typeof answer === "object") {
+    const values = Object.values(answer as Record<string, unknown>);
+    if (values.length === 0) return true;
+    return values.every((v) => isBlankAnswer(v));
+  }
+
   return false;
 }
 
@@ -475,7 +573,8 @@ async function saveAnswers(
     }
 
     // question_id 只能对着「当时的 current_schema」校验（04 文档第 29 节）
-    const known = new Set(collectQuestions(schema).map((q) => q.id));
+    const questions = collectQuestions(schema);
+    const known = new Set(questions.map((q) => q.id));
     const unknown = answers
       .map((a) => a.questionId)
       .filter((id) => !known.has(id));
@@ -485,6 +584,17 @@ async function saveAnswers(
         `问题不存在于该问卷结构：${unknown.join(", ")}`,
         { path: "questionId", questionIds: unknown }
       );
+    }
+
+    // ---- 题型格式校验（05 文档第 15.4 节要求「答案格式」检查）----
+    // 只校验「已填写」的答案：空值由必填校验在提交阶段处理，
+    // 这里不拦空值，避免调查员保存半成品时被卡住。
+    const byId = new Map(questions.map((q) => [q.id, q]));
+    for (const a of answers) {
+      if (isBlankAnswer(a.answer)) continue;
+      const question = byId.get(a.questionId);
+      if (!question) continue;
+      assertAnswerShape(question, a.answer, a.questionId);
     }
 
     // 决策 D1 的前提：答案绑定「填写时」的实例修订号

@@ -489,6 +489,41 @@ describe("下发 API（05 文档第 14 节）", () => {
       })
     ).toBe(0);
   });
+
+  it("指派给非调查人员 → 422（回归：曾可指派给 reviewer）", async () => {
+    const instanceId = await newTestInstance("confirmed");
+
+    const res = await call("POST", "/api/v1/dispatch-tasks", {
+      userId: USERS.dispatcher,
+      body: {
+        questionnaireInstanceId: instanceId,
+        assignedTo: USERS.reviewer,
+      },
+    });
+
+    expect(res.status).toBe(422);
+    expect(failureOf(res).code).toBe("VALIDATION_ERROR");
+    expect(
+      await prisma.dispatchTask.count({
+        where: { questionnaireInstanceId: instanceId },
+      })
+    ).toBe(0);
+  });
+
+  it("指派给不存在或已停用的用户 → 422", async () => {
+    const instanceId = await newTestInstance("confirmed");
+
+    const res = await call("POST", "/api/v1/dispatch-tasks", {
+      userId: USERS.dispatcher,
+      body: {
+        questionnaireInstanceId: instanceId,
+        assignedTo: "00000000-0000-4000-8000-0000000000aa",
+      },
+    });
+
+    expect(res.status).toBe(422);
+    expect(failureOf(res).code).toBe("VALIDATION_ERROR");
+  });
 });
 
 // ============================================================
@@ -596,9 +631,13 @@ describe("填写 API（05 文档第 15 节）", () => {
 
   it("批量保存答案：重复保存同一题是更新而不是新增", async () => {
     const flow = await startFlow();
-    const first = flow.firstQuestionId;
-    const second = flow.allQuestionIds[1] ?? "";
+    const all = flatQuestions(flow.questionnaire);
+    const firstQ = all[0]!;
+    const secondQ = all[1]!;
 
+    // 按题型造答案：早期这里硬编码 [1,2,3]，
+    // 而该题并不是多选题，属于测试数据本身不合题型规范
+    // （现在会被题型校验正确地拒绝）。
     const batch = await call(
       "PUT",
       `/api/v1/questionnaire-responses/${flow.responseId}/answers`,
@@ -606,8 +645,8 @@ describe("填写 API（05 文档第 15 节）", () => {
         userId: USERS.investigator,
         body: {
           answers: [
-            { questionId: first, answer: "第一版" },
-            { questionId: second, answer: [1, 2, 3] },
+            { questionId: firstQ.id, answer: sampleAnswer(firstQ) },
+            { questionId: secondQ.id, answer: sampleAnswer(secondQ) },
           ],
         },
       }
@@ -626,7 +665,11 @@ describe("填写 API（05 文档第 15 节）", () => {
       `/api/v1/questionnaire-responses/${flow.responseId}/answers`,
       {
         userId: USERS.investigator,
-        body: { answers: [{ questionId: first, answer: "第二版" }] },
+        body: {
+          answers: [
+            { questionId: firstQ.id, answer: sampleAnswer(firstQ) },
+          ],
+        },
       }
     );
     expect(again.status).toBe(200);
@@ -640,15 +683,71 @@ describe("填写 API（05 文档第 15 节）", () => {
       where: {
         responseId_questionId: {
           responseId: flow.responseId,
-          questionId: first,
+          questionId: firstQ.id,
         },
       },
     });
-    expect(row?.answer).toBe("第二版");
+    expect(row?.answer).toEqual(sampleAnswer(firstQ));
+    // 值确实被 upsert 更新过（而不是插入了第三条）
+    expect(
+      await prisma.questionnaireAnswer.count({
+        where: { responseId: flow.responseId, questionId: firstQ.id },
+      })
+    ).toBe(1);
   });
 
-  it("批量保存答案：同一批里重复提交同一个问题 → 422", async () => {
+  it("答案形状不符合题型 → 422（回归：曾可写入任意 JSON）", async () => {
     const flow = await startFlow();
+    const all = flatQuestions(flow.questionnaire);
+
+    // 找一道非 text 的题，给它写一个形状不对的答案
+    const numberQ = all.find((q) => q.type === "number");
+    const booleanQ = all.find((q) => q.type === "boolean");
+    const target = numberQ ?? booleanQ;
+    expect(target).toBeDefined();
+
+    const badAnswer = target!.type === "number" ? "不是数字" : "不是布尔";
+
+    const res = await call(
+      "PUT",
+      `/api/v1/questionnaire-responses/${flow.responseId}/answers`,
+      {
+        userId: USERS.investigator,
+        body: {
+          answers: [{ questionId: target!.id, answer: badAnswer }],
+        },
+      }
+    );
+
+    expect(res.status).toBe(422);
+    expect(failureOf(res).code).toBe("VALIDATION_ERROR");
+  });
+
+  it("text 题写入对象 → 422（回归：曾原样落库）", async () => {
+    const flow = await startFlow();
+    const textQ = flatQuestions(flow.questionnaire).find(
+      (q) => q.type === "text"
+    );
+    expect(textQ).toBeDefined();
+
+    const res = await call(
+      "PUT",
+      `/api/v1/questionnaire-responses/${flow.responseId}/answers`,
+      {
+        userId: USERS.investigator,
+        body: {
+          answers: [
+            { questionId: textQ!.id, answer: { 非法: "对象" } },
+          ],
+        },
+      }
+    );
+
+    expect(res.status).toBe(422);
+    expect(failureOf(res).code).toBe("VALIDATION_ERROR");
+  });
+
+  it("批量保存答案：同一批里重复提交同一个问题 → 422", async () => {    const flow = await startFlow();
 
     const res = await call(
       "PUT",
@@ -702,6 +801,52 @@ describe("填写 API（05 文档第 15 节）", () => {
 
     expect(res.status).toBe(409);
     expect(failureOf(res).code).toBe("INVALID_STATUS_TRANSITION");
+  });
+
+  it("提交：必填项填了空对象/含空值的数组 仍算未填 → 422（回归：曾算已填）", async () => {
+    const flow = await startFlow();
+    const required = flatQuestions(flow.questionnaire).filter(
+      (q) => q.required
+    );
+    expect(required.length).toBeGreaterThan(0);
+
+    // 所有必填都先填合法值
+    const filled = required.map((q) => ({
+      questionId: q.id,
+      answer: sampleAnswer(q),
+    }));
+    const ok = await call(
+      "PUT",
+      `/api/v1/questionnaire-responses/${flow.responseId}/answers`,
+      { userId: USERS.investigator, body: { answers: filled } }
+    );
+    expect(ok.status).toBe(200);
+
+    // 挑一个必填的 text 题，用「空对象」覆盖它
+    const textRequired = required.find((q) => q.type === "text");
+    expect(textRequired).toBeDefined();
+
+    const overwrite = await call(
+      "PUT",
+      `/api/v1/questionnaire-responses/${flow.responseId}/answers`,
+      {
+        userId: USERS.investigator,
+        body: { answers: [{ questionId: textRequired!.id, answer: {} }] },
+      }
+    );
+    expect(overwrite.status).toBe(200);
+
+    const res = await call(
+      "POST",
+      `/api/v1/questionnaire-responses/${flow.responseId}/submit`,
+      { userId: USERS.investigator }
+    );
+
+    // {} 必须被当作「未填」，否则必填校验形同虚设
+    expect(res.status).toBe(422);
+    const missing = (failureOf(res).detail?.["missingQuestionIds"] ??
+      []) as string[];
+    expect(missing).toContain(textRequired!.id);
   });
 
   it("提交：缺必填 → 422，且 detail 列出缺失的 question id", async () => {

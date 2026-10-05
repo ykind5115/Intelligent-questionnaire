@@ -191,7 +191,7 @@ export const dispatchService = {
 
       const assignee = await tx.user.findUnique({
         where: { id: input.assignedTo },
-        select: { id: true, status: true },
+        select: { id: true, status: true, roles: true },
       });
       if (!assignee) {
         throw validationError(
@@ -203,6 +203,21 @@ export const dispatchService = {
         throw validationError(
           `被指派的用户已停用：${input.assignedTo}`,
           { path: "assignedTo", status: assignee.status }
+        );
+      }
+
+      // 只能指派给调查人员（决策 D8）：
+      // 否则会出现「指派给审核人/模板管理员」这种业务上不成立的待办，
+      // 而 investigator 的横向授权规则又是围绕 dispatch_tasks 建立的，
+      // 一旦指派对象不是 investigator，权限模型就会出现无意义的中间态。
+      if (!assignee.roles.includes("investigator")) {
+        throw validationError(
+          `只能指派给 investigator 角色的用户，` +
+            `用户 ${input.assignedTo} 的角色为 [${assignee.roles.join(", ")}]`,
+          {
+            path: "assignedTo",
+            roles: assignee.roles,
+          }
         );
       }
 

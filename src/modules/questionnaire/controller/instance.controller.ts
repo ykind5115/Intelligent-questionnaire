@@ -155,9 +155,13 @@ export function createInstanceRouter(): Router {
     validate({ params: instanceParams, body: confirmBody.optional() }),
     asyncHandler(async (req: Request, res: Response) => {
       const { instanceId } = req.params as z.infer<typeof instanceParams>;
+      const body = (req.body ?? {}) as z.infer<typeof confirmBody>;
+
       const result = await questionnaireService.confirmInstance(
         instanceId,
-        serviceContextOf(req)
+        serviceContextOf(req),
+        // 05 文档第 35 节：客户端可带上它看到的 revision 做乐观锁校验
+        body.revision !== undefined ? { expectedRevision: body.revision } : {}
       );
       sendSuccess(req, res, result);
     })

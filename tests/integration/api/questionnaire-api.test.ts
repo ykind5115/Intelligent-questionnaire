@@ -625,8 +625,49 @@ describe("实例状态流转 API", () => {
     );
 
     expect(res.status).toBe(200);
-    const data = expectData<{ status: string }>(res);
+    const data = expectData<{ status: string; revision: number }>(res);
     expect(data.status).toBe("confirmed");
+    expect(data.revision).toBe(1);
+  });
+
+  it("confirm 带错误的 revision → 409 REVISION_CONFLICT（回归：曾静默接受）", async () => {
+    const instanceId = await makeInstance();
+
+    // 实例的 current_revision 是 1，这里故意传一个不一致的值。
+    // 早期实现里 controller 校验了 body.revision 却没传给 Service，
+    // 于是传错也会被静默接受 —— 客户端以为自己拿到了乐观锁保护。
+    const res = await apiRequest(
+      client,
+      "POST",
+      `/api/v1/questionnaire-instances/${instanceId}/confirm`,
+      { userId: USERS.dispatcher, body: { revision: 99 } }
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error?.code).toBe("REVISION_CONFLICT");
+
+    // 状态未被改变
+    const check = await apiRequest(
+      client,
+      "GET",
+      `/api/v1/questionnaire-instances/${instanceId}`,
+      { userId: USERS.dispatcher }
+    );
+    expect(expectData<{ status: string }>(check).status).toBe("draft");
+  });
+
+  it("confirm 带正确的 revision → 200", async () => {
+    const instanceId = await makeInstance();
+
+    const res = await apiRequest(
+      client,
+      "POST",
+      `/api/v1/questionnaire-instances/${instanceId}/confirm`,
+      { userId: USERS.dispatcher, body: { revision: 1 } }
+    );
+
+    expect(res.status).toBe(200);
+    expect(expectData<{ status: string }>(res).status).toBe("confirmed");
   });
 
   it("重复 confirm 返回 409", async () => {

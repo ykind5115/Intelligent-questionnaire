@@ -881,10 +881,20 @@ export const questionnaireService = {
   // 状态流转：确认 / 撤回（决策 D1）
   // ----------------------------------------------------------
 
+  /**
+   * 确认问卷实例（draft → confirmed）。
+   *
+   * `options.expectedRevision`（05 文档第 35 节）：
+   *   客户端可以带上它「看到的」revision。
+   *   注意：早期实现里 controller 校验了这个参数却没传给 Service，
+   *   于是传错 revision 也会被静默接受 —— 客户端以为自己拿到了乐观锁保护，
+   *   实际上没有。现在真正生效：不一致直接 409。
+   */
   async confirmInstance(
     instanceId: string,
-    ctx: ServiceContext
-  ): Promise<{ id: string; status: string }> {
+    ctx: ServiceContext,
+    options: { expectedRevision?: number } = {}
+  ): Promise<{ id: string; status: string; revision: number }> {
     assertCanWriteStructure(ctx);
 
     return transaction(async (tx: Tx) => {
@@ -898,6 +908,18 @@ export const questionnaireService = {
           `问卷实例不存在：${instanceId}`
         );
       }
+
+      // 乐观锁：确认的必须是客户端「看到的那一版」
+      if (
+        options.expectedRevision !== undefined &&
+        options.expectedRevision !== instance.currentRevision
+      ) {
+        throw revisionConflict(
+          options.expectedRevision,
+          instance.currentRevision
+        );
+      }
+
       if (instance.status !== "draft") {
         throw new OperationError(
           ErrorCode.INVALID_STATUS_TRANSITION,
@@ -909,7 +931,11 @@ export const questionnaireService = {
         { instanceId, status: "confirmed" },
         tx
       );
-      return { id: updated.id, status: updated.status };
+      return {
+        id: updated.id,
+        status: updated.status,
+        revision: updated.currentRevision,
+      };
     });
   },
 

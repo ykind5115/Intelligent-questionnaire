@@ -410,6 +410,19 @@ export const reviewService = {
         select: { id: true, status: true },
       });
 
+      // 审核通过时把该实例的下发任务一并置为 completed。
+      // 04 文档第 25.3 节定义了 completed 取值，但早期实现从不写入，
+      // 于是任务列表永远显示 dispatched，无法反映「已完成」。
+      if (approved) {
+        await tx.dispatchTask.updateMany({
+          where: {
+            questionnaireInstanceId: instance.id,
+            status: { in: ["pending", "dispatched"] },
+          },
+          data: { status: "completed" },
+        });
+      }
+
       await writeAudit(tx, {
         ctx,
         toolName: "review_response",
