@@ -1,0 +1,22 @@
+# pnpm 11 会默认拦截依赖的构建脚本。
+# Prisma 的 postinstall/preinstall 必须放行，否则：
+#   1. 安装时直接以 ERR_PNPM_IGNORED_BUILDS 失败；
+#   2. 连 `pnpm exec prisma -v` 都会失败（pnpm exec 先做依赖状态校验）。
+#
+# 实测结论（见 docs/06-proj_init.md 第 3B 节）：
+#   - package.json 的 pnpm.onlyBuiltDependencies      无效
+#   - pnpm-workspace.yaml 的 onlyBuiltDependencies   无效
+#   - pnpm-workspace.yaml 的 allowBuilds 映射         有效
+#
+# 该文件必须在第一次 pnpm install 之前就存在；
+# 若已装过且被拦截，只能删除 node_modules 后重装（pnpm rebuild 无效）。
+#
+# 注意：pnpm 在检测到未放行的构建脚本时，会自动往本文件写入
+#   <pkg>: set this to true or false
+# 这种占位行 —— 它不会放行，必须手动改成 true。
+allowBuilds:
+  prisma: true
+  '@prisma/engines': true
+  # tsx / vitest 依赖 esbuild，同样会被这一机制拦截
+  esbuild: true
+

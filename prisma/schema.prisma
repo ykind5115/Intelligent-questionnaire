@@ -1,0 +1,390 @@
+// 智能问卷系统 - Prisma Schema V1
+//
+// 设计依据：
+//   docs/04-database_design.md（表结构）
+//   docs/09-review-and-decisions.md（D1~D13 决策）
+//
+// 注意（Prisma 7 变化）：
+//   1. datasource 不再写 url，改在 prisma7.config.ts 中配置；
+//   2. generator 使用 "prisma-client"（不是 prisma-client-js），产物输出到 generated/。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// 用户与角色（决策 D8：users.roles 数组，不建独立 RBAC 表）
+// ============================================================
+
+model User {
+  id           String   @id @db.Uuid
+  username     String   @unique @db.VarChar(100)
+  displayName  String   @map("display_name") @db.VarChar(100)
+  passwordHash String?  @map("password_hash")
+  status       String   @default("active") @db.VarChar(20)
+
+  /// 角色数组：template_admin / dispatcher / investigator / reviewer
+  roles String[] @default([])
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  createdTemplates        QuestionnaireTemplate[]        @relation("TemplateCreator")
+  createdTemplateVersions QuestionnaireTemplateVersion[] @relation("TemplateVersionCreator")
+  createdInstances        QuestionnaireInstance[]        @relation("InstanceCreator")
+  createdRevisions        QuestionnaireRevision[]        @relation("RevisionCreator")
+  conversations           AiConversation[]
+  dispatchedTasks         DispatchTask[]                 @relation("DispatchCreator")
+  assignedTasks           DispatchTask[]                 @relation("DispatchAssignee")
+  withdrawnTasks          DispatchTask[]                 @relation("DispatchWithdrawer")
+  responses               QuestionnaireResponse[]
+  reviews                 ReviewRecord[]
+
+  @@map("users")
+}
+
+// ============================================================
+// 模板与模板版本
+// ============================================================
+
+model QuestionnaireTemplate {
+  id          String  @id @db.Uuid
+  name        String  @db.VarChar(200)
+  description String?
+
+  /// draft / published / disabled
+  status String @default("draft") @db.VarChar(20)
+
+  /// 当前正式版本。与 template_versions 互为循环引用，
+  /// 因此该字段可空，由 migration 事后补 FK（见 04 文档第 51.1 节）。
+  currentVersionId String? @unique @map("current_version_id") @db.Uuid
+
+  createdBy String   @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  createdByUser User                           @relation("TemplateCreator", fields: [createdBy], references: [id])
+  currentVersion QuestionnaireTemplateVersion? @relation("TemplateCurrentVersion", fields: [currentVersionId], references: [id])
+  versions      QuestionnaireTemplateVersion[] @relation("TemplateVersions")
+
+  @@index([status])
+  @@index([createdBy])
+  @@map("questionnaire_templates")
+}
+
+model QuestionnaireTemplateVersion {
+  id         String @id @db.Uuid
+  templateId String @map("template_id") @db.Uuid
+
+  versionNo Int @map("version_no")
+
+  /// QuestionnaireSchema（问卷树结构），见 03 文档第 4 节
+  schema Json
+
+  changeNote String? @map("change_note")
+
+  /// draft / published / disabled
+  status String @default("draft") @db.VarChar(20)
+
+  /// manual / ai_generated / promoted_from_instance（决策 D2）
+  sourceType String @default("manual") @map("source_type") @db.VarChar(30)
+
+  /// 扶正来源：来自哪个问卷实例（可空）
+  sourceInstanceId String? @map("source_instance_id") @db.Uuid
+
+  createdBy String   @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  template       QuestionnaireTemplate @relation("TemplateVersions", fields: [templateId], references: [id])
+  createdByUser  User                  @relation("TemplateVersionCreator", fields: [createdBy], references: [id])
+  sourceInstance QuestionnaireInstance? @relation("PromotedFromInstance", fields: [sourceInstanceId], references: [id])
+
+  /// 反向：该版本作为模板来源派生出的实例
+  derivedInstances QuestionnaireInstance[] @relation("InstanceTemplateVersion")
+
+  /// 反向：该版本是某个模板的 current_version
+  currentOfTemplate QuestionnaireTemplate? @relation("TemplateCurrentVersion")
+
+  @@unique([templateId, versionNo])
+  @@index([templateId])
+  @@map("questionnaire_template_versions")
+}
+
+// ============================================================
+// 问卷实例与实例修订
+// ============================================================
+
+model QuestionnaireInstance {
+  id                String @id @db.Uuid
+  templateVersionId String @map("template_version_id") @db.Uuid
+
+  title String @db.VarChar(200)
+
+  /// 调查对象基础信息（姓名/身份证号/住址等），结构随业务可变
+  subjectInfo Json? @map("subject_info")
+
+  /// 实例自己的问卷结构：从模板版本克隆而来，AI 只改这里
+  currentSchema Json @map("current_schema")
+
+  currentRevision Int @default(1) @map("current_revision")
+
+  /// draft / confirmed / dispatched / in_progress / submitted
+  /// / under_review / returned / completed（决策 D1：仅 draft、confirmed 允许改结构）
+  status String @default("draft") @db.VarChar(30)
+
+  createdBy String   @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  templateVersion QuestionnaireTemplateVersion @relation("InstanceTemplateVersion", fields: [templateVersionId], references: [id])
+  createdByUser   User                         @relation("InstanceCreator", fields: [createdBy], references: [id])
+
+  revisions       QuestionnaireRevision[]
+  responses       QuestionnaireResponse[]
+  dispatchTasks   DispatchTask[]
+  promotedVersions QuestionnaireTemplateVersion[] @relation("PromotedFromInstance")
+  toolExecutions  AiToolExecution[]
+
+  @@index([templateVersionId])
+  @@index([status])
+  @@index([createdBy])
+  @@map("questionnaire_instances")
+}
+
+model QuestionnaireRevision {
+  id String @id @db.Uuid
+
+  questionnaireInstanceId String @map("questionnaire_instance_id") @db.Uuid
+
+  revisionNo Int @map("revision_no")
+
+  /// 该修订版本的完整问卷结构快照
+  schemaSnapshot Json @map("schema_snapshot")
+
+  /// 触发本次修订的操作类型，例如 add_question
+  operationType String? @map("operation_type") @db.VarChar(30)
+
+  /// 决策 D9：一次 Tool 调用一个 operation_id
+  /// 注意：此处不加唯一约束，幂等判断由 ai_tool_executions 负责
+  operationId String? @map("operation_id") @db.Uuid
+
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  instance      QuestionnaireInstance @relation(fields: [questionnaireInstanceId], references: [id])
+  createdByUser User?                 @relation("RevisionCreator", fields: [createdBy], references: [id])
+
+  @@unique([questionnaireInstanceId, revisionNo])
+  @@index([questionnaireInstanceId])
+  @@map("questionnaire_revisions")
+}
+
+// ============================================================
+// AI 会话 / 消息 / 工具执行
+// ============================================================
+
+model AiConversation {
+  id     String @id @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  /// create_template / modify_questionnaire
+  scene String @db.VarChar(50)
+
+  /// template / questionnaire_instance
+  targetType String? @map("target_type") @db.VarChar(50)
+  targetId   String? @map("target_id") @db.Uuid
+
+  status String @default("active") @db.VarChar(20)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user         User              @relation(fields: [userId], references: [id])
+  messages     AiMessage[]
+  toolExecutions AiToolExecution[]
+
+  @@index([userId])
+  @@map("ai_conversations")
+}
+
+model AiMessage {
+  id             String  @id @db.Uuid
+  conversationId String  @map("conversation_id") @db.Uuid
+
+  /// user / assistant / tool / system
+  role String @db.VarChar(20)
+
+  content String?
+
+  toolName      String? @map("tool_name") @db.VarChar(100)
+  toolCallId    String? @map("tool_call_id") @db.VarChar(100)
+  toolArguments Json?   @map("tool_arguments")
+  toolResult    Json?   @map("tool_result")
+
+  sequenceNo Int @map("sequence_no")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  conversation   AiConversation    @relation(fields: [conversationId], references: [id])
+  toolExecutions AiToolExecution[]
+
+  @@unique([conversationId, sequenceNo])
+  @@index([conversationId])
+  @@map("ai_messages")
+}
+
+model AiToolExecution {
+  id String @id @db.Uuid
+
+  /// 来自 AI 会话时必填；来自 REST / 人工编辑时为 null（决策 D3 的人工编辑器同样要留痕）
+  conversationId String? @map("conversation_id") @db.Uuid
+
+  questionnaireInstanceId String? @map("questionnaire_instance_id") @db.Uuid
+
+  messageId String? @map("message_id") @db.Uuid
+
+  /// 决策 D9：一次 Tool 调用一个 operation_id，用于幂等
+  /// UNIQUE 是数据库层兜底；应用层必须先查后插，不靠冲突判重
+  operationId String @unique @map("operation_id") @db.Uuid
+
+  /// 变更来源：ai_tool / rest / manual_editor
+  /// 依据 02 文档第 15 节：问卷结构修改必须可追溯到来源
+  source String @default("ai_tool") @db.VarChar(20)
+
+  toolName String @map("tool_name") @db.VarChar(100)
+
+  arguments Json
+  result    Json?
+
+  success   Boolean
+  errorCode String? @map("error_code") @db.VarChar(100)
+
+  /// 记录调用的模型，便于问题定位（08 文档第 47.1 节）
+  model String? @db.VarChar(100)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  conversation AiConversation?        @relation(fields: [conversationId], references: [id])
+  instance     QuestionnaireInstance? @relation(fields: [questionnaireInstanceId], references: [id])
+  message      AiMessage?             @relation(fields: [messageId], references: [id])
+
+  @@index([conversationId])
+  @@index([questionnaireInstanceId])
+  @@map("ai_tool_executions")
+}
+
+// ============================================================
+// 下发任务（决策 D1：撤回支持）
+// ============================================================
+
+model DispatchTask {
+  id String @id @db.Uuid
+
+  questionnaireInstanceId String @map("questionnaire_instance_id") @db.Uuid
+
+  assignedTo   String @map("assigned_to") @db.Uuid
+  dispatchedBy String @map("dispatched_by") @db.Uuid
+
+  /// pending / dispatched / withdrawn / completed
+  status String @default("pending") @db.VarChar(30)
+
+  dispatchedAt DateTime? @map("dispatched_at") @db.Timestamptz(6)
+  dueAt        DateTime? @map("due_at") @db.Timestamptz(6)
+
+  withdrawnAt DateTime? @map("withdrawn_at") @db.Timestamptz(6)
+  withdrawnBy String?   @map("withdrawn_by") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  instance        QuestionnaireInstance @relation(fields: [questionnaireInstanceId], references: [id])
+  assignee        User                  @relation("DispatchAssignee", fields: [assignedTo], references: [id])
+  dispatcher      User                  @relation("DispatchCreator", fields: [dispatchedBy], references: [id])
+  withdrawer      User?                 @relation("DispatchWithdrawer", fields: [withdrawnBy], references: [id])
+
+  @@index([assignedTo])
+  @@index([status])
+  @@map("dispatch_tasks")
+}
+
+// ============================================================
+// 填写结果与答案
+// ============================================================
+
+model QuestionnaireResponse {
+  id String @id @db.Uuid
+
+  questionnaireInstanceId String @map("questionnaire_instance_id") @db.Uuid
+
+  /// 实际填写这份问卷的调查人员（不是被调查对象）
+  respondentId String @map("respondent_id") @db.Uuid
+
+  /// draft / submitted / withdrawn（决策 D1：撤回后标记失效）
+  status String @default("draft") @db.VarChar(30)
+
+  submittedAt DateTime? @map("submitted_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  instance   QuestionnaireInstance @relation(fields: [questionnaireInstanceId], references: [id])
+  respondent User                  @relation(fields: [respondentId], references: [id])
+
+  answers QuestionnaireAnswer[]
+  reviews ReviewRecord[]
+
+  @@index([questionnaireInstanceId])
+  @@index([respondentId])
+  @@map("questionnaire_responses")
+}
+
+model QuestionnaireAnswer {
+  id String @id @db.Uuid
+
+  responseId String @map("response_id") @db.Uuid
+
+  /// 逻辑关联问卷结构中的 question.id（JSONB 内节点，无法建外键）
+  questionId String @map("question_id") @db.VarChar(100)
+
+  /// 填写时所处的实例修订号，用于在题目被改名/改选项后仍能解释历史答案
+  revisionNo Int @map("revision_no")
+
+  answer Json?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  response QuestionnaireResponse @relation(fields: [responseId], references: [id])
+
+  @@unique([responseId, questionId])
+  @@map("questionnaire_answers")
+}
+
+// ============================================================
+// 审核记录
+// ============================================================
+
+model ReviewRecord {
+  id String @id @db.Uuid
+
+  questionnaireResponseId String @map("questionnaire_response_id") @db.Uuid
+
+  reviewerId String @map("reviewer_id") @db.Uuid
+
+  /// approved / rejected
+  result String @db.VarChar(30)
+
+  comment String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  response QuestionnaireResponse @relation(fields: [questionnaireResponseId], references: [id])
+  reviewer User                  @relation(fields: [reviewerId], references: [id])
+
+  @@map("review_records")
+}

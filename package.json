@@ -1,0 +1,46 @@
+{
+  "name": "intelligent-questionnaire",
+  "version": "0.1.0",
+  "private": true,
+  "description": "智能问卷系统 - AI 辅助问卷生成与动态编排",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "db:dev": "prisma dev",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:reset": "prisma migrate reset --force",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"prisma/**/*.ts\""
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "7.10.0",
+    "express": "^5.1.0",
+    "pg": "^8.23.1",
+    "uuid": "^11.1.0",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.18.8",
+    "@types/uuid": "^10.0.0",
+    "dotenv": "^17.2.3",
+    "prisma": "7.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
