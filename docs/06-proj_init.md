@@ -3263,24 +3263,25 @@ SSE 流式输出
 02. 建立 PostgreSQL 连接                      ✅（prisma dev 本地实例）
 03. 建立 Migration                            ✅（12 张表，含两处循环外键的 ALTER 处理）
 04. 实现 Questionnaire Schema                 ✅（Zod，含 V1 不嵌套 section 的校验）
-05. 实现 Questionnaire Operation              ✅（6 个纯函数 + 单元测试 44 例）
+05. 实现 Questionnaire Operation              ✅（6 个纯函数 + 单元测试）
 06. 实现 Questionnaire Repository             ✅（乐观锁 / Revision / 审计 / 幂等查询）
 07. 实现 Questionnaire Service                ✅（权限 D8 + 状态校验 D1 + 事务 + 幂等 D9）
 08. 实现基础 REST API                         ✅（模板/实例/AI 会话/下发/填写/审核 + 统一错误处理）
-09. 实现 LLM Provider                         ✅（抽象 + DeepSeek，19 例线格式测试）
+09. 实现 LLM Provider                         ✅（抽象 + DeepSeek，含线格式测试）
 10. 实现 AI Conversation                      ✅（落库 + 历史回放 + 驱动 Orchestrator）
 11. 实现 Tool Registry                        ✅（含 Zod → JSON Schema 生成）
 12. 实现第一个 Tool                           ✅
 13. 完成 AI → Tool → DB                       ✅（假 Provider 驱动真实 Tool→Service→DB）
 14. 实现全部 V1 Tool                          ✅（7 个，无宏工具）
-15. 实现 AI 创建问卷                          ✅（create_template 场景可写模板草稿；commit 端点已实现）
+15. 实现 AI 创建问卷                          ✅（create_template 可写模板草稿 + commit 端点）
 16. 实现 Template → Instance                  ✅（克隆 schema + 写 Revision 1）
-17. 实现 AI 修改 Instance                     🟡 链路已通；需接真实模型端到端验证
+17. 实现 AI 修改 Instance                     ✅（增量 Tool + Revision 递增）
 18. 接入下发 / 填写 / 审核                    ✅
-19. 撤回                                      ✅（Service + API 均已实现并测试）
+19. 撤回                                      ✅（清理既有数据 + 二次下发可取新答卷）
 20. 扶正为模板版本                            ✅（promoteToTemplate + API + 测试）
-21. 固定用例集 + seed 测试数据                🟡 seed 已完成；AI 评测用例集待做
-22. 人工编辑器（上线前兜底，决策 D3）         ⬜
+21. 固定用例集 + seed 测试数据                ✅（8 条 AI 评测用例 + 四类量化指标）
+22. 人工编辑器（上线前兜底，决策 D3）         ⬜（排期允许）
+23. SSE 流式端点 / 前端页面                   ⬜
 ```
 
 **当前质量门禁：**
