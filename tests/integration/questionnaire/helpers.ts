@@ -163,6 +163,10 @@ export async function createTestConversation(
 }
 
 export async function deleteTestConversation(id: string): Promise<void> {
+  // 删除顺序必须遵守外键依赖：
+  // ai_tool_executions 与 ai_messages 都引用 ai_conversations，
+  // 且都没有级联删除，因此必须先删子表再删会话。
   await prisma.aiToolExecution.deleteMany({ where: { conversationId: id } });
+  await prisma.aiMessage.deleteMany({ where: { conversationId: id } });
   await prisma.aiConversation.deleteMany({ where: { id } });
 }

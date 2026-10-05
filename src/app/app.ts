@@ -4,11 +4,26 @@
  * 依据 docs/06-proj_init.md 第 8 节：
  *   app.ts 只负责注册 middleware / routes / error handler，
  *   不承载业务逻辑。
+ *
+ * 中间件顺序有讲究：
+ *   json 解析 → requestId → 鉴权 → 业务路由 → 404 → 错误处理
+ *   错误处理必须最后注册，否则无法捕获前面抛出的异常。
  */
-import express, { type Express, type NextFunction, type Request, type Response } from "express";
+import express, {
+  type Express,
+  type NextFunction,
+  type Request,
+  type Response,
+} from "express";
 import { prisma } from "../database/client.js";
 import { env } from "../config/env.js";
-import { devAuthMiddleware, productionAuthGuard } from "../shared/auth/auth.middleware.js";
+import { sendSuccess } from "./api-response.js";
+import { createApiRouter } from "./routes.js";
+import { errorHandler, notFoundHandler } from "./error-handler.js";
+import {
+  devAuthMiddleware,
+  productionAuthGuard,
+} from "../shared/auth/auth.middleware.js";
 
 export function createApp(): Express {
   // 生产环境若无真实鉴权则拒绝启动（决策 D11）
@@ -19,7 +34,7 @@ export function createApp(): Express {
   app.use(express.json({ limit: "2mb" }));
 
   // 请求 ID：后续日志与审计都依赖它关联
-  app.use((req, _res, next) => {
+  app.use((req: Request, _res: Response, next: NextFunction) => {
     if (!req.header("x-request-id")) {
       req.headers["x-request-id"] = crypto.randomUUID();
     }
@@ -29,7 +44,7 @@ export function createApp(): Express {
   // 开发态鉴权（决策 D11）
   app.use(devAuthMiddleware());
 
-  // ---------------- 健康检查 ----------------
+  // ---------------- 健康检查（无需业务权限） ----------------
   app.get("/healthz", async (_req: Request, res: Response) => {
     let db = "down";
     try {
@@ -51,36 +66,19 @@ export function createApp(): Express {
     });
   });
 
-  // ---------------- 当前用户（用于验证鉴权链路） ----------------
+  // 当前用户（用于验证鉴权链路）
   app.get("/api/v1/me", (req: Request, res: Response) => {
-    res.json({
-      success: true,
-      data: req.currentUser ?? null,
-    });
+    sendSuccess(req, res, req.currentUser ?? null);
   });
+
+  // ---------------- 业务路由 ----------------
+  app.use("/api/v1", createApiRouter());
 
   // ---------------- 未匹配路由 ----------------
-  app.use((req: Request, res: Response) => {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: "NOT_FOUND",
-        message: `无此接口：${req.method} ${req.path}`,
-      },
-    });
-  });
+  app.use(notFoundHandler);
 
-  // ---------------- 统一错误处理 ----------------
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const message = err instanceof Error ? err.message : String(err);
-    // eslint-disable-next-line no-console
-    console.error("[error]", message);
-
-    res.status(500).json({
-      success: false,
-      error: { code: "SYSTEM_ERROR", message },
-    });
-  });
+  // ---------------- 统一错误处理（必须最后） ----------------
+  app.use(errorHandler);
 
   return app;
 }

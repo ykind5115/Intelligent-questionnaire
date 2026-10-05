@@ -29,6 +29,8 @@ export interface InstanceRecord {
   status: string;
   currentRevision: number;
   currentSchema: QuestionnaireSchema;
+  /** 调查对象基础信息（结构随业务可变） */
+  subjectInfo: Record<string, unknown> | null;
   createdBy: string;
 }
 
@@ -75,6 +77,7 @@ export const questionnaireRepository = {
       status: row.status,
       currentRevision: row.currentRevision,
       currentSchema: parseSchema(row.currentSchema, `实例 ${row.id}`),
+      subjectInfo: (row.subjectInfo ?? null) as Record<string, unknown> | null,
       createdBy: row.createdBy,
     };
   },
@@ -115,6 +118,32 @@ export const questionnaireRepository = {
     });
     if (!row) return null;
     return parseSchema(row.schemaSnapshot, `修订 ${instanceId}#${revisionNo}`);
+  },
+
+  /** 列出实例的修订历史（不含快照内容，避免列表接口过大） */
+  async listRevisions(
+    instanceId: string,
+    client: DbClient = prisma
+  ): Promise<
+    {
+      revisionNo: number;
+      operationType: string | null;
+      operationId: string | null;
+      createdBy: string | null;
+      createdAt: Date;
+    }[]
+  > {
+    return client.questionnaireRevision.findMany({
+      where: { questionnaireInstanceId: instanceId },
+      orderBy: { revisionNo: "asc" },
+      select: {
+        revisionNo: true,
+        operationType: true,
+        operationId: true,
+        createdBy: true,
+        createdAt: true,
+      },
+    });
   },
 
   // ==========================================================

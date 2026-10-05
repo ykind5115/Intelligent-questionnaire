@@ -15,6 +15,7 @@
  */
 import { transaction, type Tx } from "../../../database/transaction.js";
 import { newId, uuidValidate } from "../../../shared/utils/id.js";
+import { toJsonValue } from "../../../shared/utils/json.js";
 import {
   ErrorCode,
   OperationError,
@@ -259,6 +260,277 @@ export const questionnaireService = {
       );
     }
     return instance;
+  },
+
+  // ----------------------------------------------------------
+  // 创建实例（模板版本 → 问卷实例）
+  // ----------------------------------------------------------
+
+  /**
+   * 从模板版本派生一个问卷实例。
+   *
+   * 依据 04 文档第 14 / 46 节与 05 文档第 11.1 节：
+   *   读取 template_version.schema → 复制 → 创建 instance
+   *   → current_revision = 1 → 同时写入 Revision 1 快照
+   *
+   * 为什么要同时写 Revision 1（而不是等第一次修改再写）：
+   *   这样实例从出生起就有完整快照，日后任何一次修改都能与
+   *   「修改前是什么样」形成明确边界（04 文档第 17 节）。
+   *
+   * 关键：**复制出来的 schema 会换一个新 id**，
+   *   否则实例与模板版本共享同一个 schema id，语义上会混淆
+   *   「这份结构是谁的」。
+   */
+  async createInstance(
+    input: {
+      templateVersionId: string;
+      title: string;
+      subjectInfo?: Record<string, unknown>;
+    },
+    ctx: ServiceContext
+  ): Promise<InstanceRecord> {
+    assertCanWriteStructure(ctx);
+    assertServiceContext(ctx);
+
+    const title = input.title?.trim();
+    if (!title) {
+      throw validationError("实例标题不能为空", { path: "title" });
+    }
+
+    return transaction(async (tx: Tx) => {
+      const version = await questionnaireRepository.findTemplateVersionById(
+        input.templateVersionId,
+        tx
+      );
+      if (!version) {
+        throw new OperationError(
+          ErrorCode.TEMPLATE_VERSION_NOT_FOUND,
+          `模板版本不存在：${input.templateVersionId}`
+        );
+      }
+
+      if (version.status !== "published") {
+        throw new OperationError(
+          ErrorCode.INVALID_STATUS_TRANSITION,
+          `模板版本状态为 ${version.status}，只有已发布版本可以派生实例`
+        );
+      }
+
+      // 克隆模板结构，并换上新 id
+      const instanceSchema: QuestionnaireSchema = {
+        ...structuredClone(version.schema),
+        id: newId(),
+      };
+
+      const instanceId = newId();
+
+      const created = await tx.questionnaireInstance.create({
+        data: {
+          id: instanceId,
+          templateVersionId: version.id,
+          title,
+          ...(input.subjectInfo !== undefined
+            ? { subjectInfo: toJsonValue(input.subjectInfo) }
+            : {}),
+          currentSchema: toJsonValue(instanceSchema),
+          currentRevision: 1,
+          status: "draft",
+          createdBy: ctx.userId,
+        },
+      });
+
+      await questionnaireRepository.createRevision(
+        {
+          instanceId,
+          revisionNo: 1,
+          schema: instanceSchema,
+          operationType: "create_instance",
+          createdBy: ctx.userId,
+        },
+        tx
+      );
+
+      return {
+        id: created.id,
+        templateVersionId: created.templateVersionId,
+        title: created.title,
+        status: created.status,
+        currentRevision: created.currentRevision,
+        currentSchema: instanceSchema,
+        subjectInfo:
+          (created.subjectInfo ?? null) as Record<string, unknown> | null,
+        createdBy: created.createdBy,
+      };
+    });
+  },
+
+  /** 读取实例的修订历史（不含完整快照，避免响应过大） */
+  async listRevisions(
+    instanceId: string,
+    ctx: ServiceContext
+  ): Promise<
+    {
+      revisionNo: number;
+      operationType: string | null;
+      operationId: string | null;
+      createdBy: string | null;
+      createdAt: Date;
+    }[]
+  > {
+    // 复用读取权限校验
+    await this.getInstance(instanceId, ctx);
+
+    const rows = await questionnaireRepository.listRevisions(instanceId);
+    return rows.map((r) => ({
+      revisionNo: r.revisionNo,
+      operationType: r.operationType,
+      operationId: r.operationId,
+      createdBy: r.createdBy,
+      createdAt: r.createdAt,
+    }));
+  },
+
+  /** 读取指定修订的完整结构快照 */
+  async getRevisionSchema(
+    instanceId: string,
+    revisionNo: number,
+    ctx: ServiceContext
+  ): Promise<QuestionnaireSchema> {
+    await this.getInstance(instanceId, ctx);
+
+    const snapshot = await questionnaireRepository.findRevisionSnapshot(
+      instanceId,
+      revisionNo
+    );
+    if (!snapshot) {
+      throw new OperationError(
+        ErrorCode.QUESTIONNAIRE_NOT_FOUND,
+        `修订不存在：${instanceId} #${revisionNo}`
+      );
+    }
+    return snapshot;
+  },
+
+  // ----------------------------------------------------------
+  // 扶正为模板版本（决策 D2）
+  // ----------------------------------------------------------
+
+  /**
+   * 把实例当前结构扶正为模板的新草稿版本。
+   *
+   * 依据决策 D2 与 05 文档第 13B 节：
+   *   生成的是 **draft 版本**，不直接发布，
+   *   正式模板的发布仍须走模板版本治理流程。
+   *
+   * 为什么需要它：
+   *   同类案件的重复临时改动，说明标准模板缺失，
+   *   应该沉淀进模板库，而不是每次手工补。
+   */
+  async promoteToTemplate(
+    instanceId: string,
+    input: { changeNote?: string },
+    ctx: ServiceContext
+  ): Promise<{
+    templateId: string;
+    templateVersionId: string;
+    versionNo: number;
+    status: string;
+  }> {
+    // 扶正会向模板库写入内容，因此需要模板管理权限
+    const canPromote = ctx.roles.some((r) =>
+      (STRUCTURE_WRITE_ROLES as readonly string[]).includes(r)
+    );
+    if (!canPromote) {
+      throw permissionDenied(
+        `当前用户角色 [${ctx.roles.join(", ")}] 无权扶正为模板`
+      );
+    }
+    assertServiceContext(ctx);
+
+    return transaction(async (tx: Tx) => {
+      const instance = await questionnaireRepository.findInstanceById(
+        instanceId,
+        tx
+      );
+      if (!instance) {
+        throw new OperationError(
+          ErrorCode.QUESTIONNAIRE_NOT_FOUND,
+          `问卷实例不存在：${instanceId}`
+        );
+      }
+
+      // 只有尚未下发（结构仍可信）的实例才能扶正
+      if (!STRUCTURE_WRITABLE_STATUSES.includes(instance.status)) {
+        throw new OperationError(
+          ErrorCode.PROMOTE_NOT_ALLOWED,
+          `实例状态为 ${instance.status}，已下发或已完成的问卷不能直接扶正为模板`,
+          { path: "status", status: instance.status }
+        );
+      }
+
+      const version = await tx.questionnaireTemplateVersion.findUnique({
+        where: { id: instance.templateVersionId },
+        select: { templateId: true },
+      });
+      if (!version) {
+        throw new OperationError(
+          ErrorCode.TEMPLATE_VERSION_NOT_FOUND,
+          `来源模板版本已不存在：${instance.templateVersionId}`
+        );
+      }
+
+      const last = await tx.questionnaireTemplateVersion.findFirst({
+        where: { templateId: version.templateId },
+        orderBy: { versionNo: "desc" },
+        select: { versionNo: true },
+      });
+      const versionNo = (last?.versionNo ?? 0) + 1;
+
+      // 复制实例结构；换新 id，避免与实例共享同一 schema id
+      const promotedSchema: QuestionnaireSchema = {
+        ...structuredClone(instance.currentSchema),
+        id: newId(),
+      };
+
+      const created = await tx.questionnaireTemplateVersion.create({
+        data: {
+          id: newId(),
+          templateId: version.templateId,
+          versionNo,
+          schema: toJsonValue(promotedSchema),
+          changeNote:
+            input.changeNote ?? `由实例扶正：${instance.title}`,
+          status: "draft",
+          sourceType: "promoted_from_instance",
+          sourceInstanceId: instanceId,
+          createdBy: ctx.userId,
+        },
+      });
+
+      await questionnaireRepository.createAuditLog(
+        {
+          operationId: ctx.operationId ?? newId(),
+          source: ctx.source ?? "rest",
+          toolName: "promote_to_template",
+          instanceId,
+          arguments: { changeNote: input.changeNote ?? null },
+          result: {
+            templateId: version.templateId,
+            templateVersionId: created.id,
+            versionNo,
+          },
+          success: true,
+        },
+        tx
+      );
+
+      return {
+        templateId: version.templateId,
+        templateVersionId: created.id,
+        versionNo,
+        status: created.status,
+      };
+    });
   },
 
   // ----------------------------------------------------------
