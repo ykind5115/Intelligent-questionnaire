@@ -5,7 +5,7 @@
  * 依据决策 D13：所有连接参数来自环境变量，
  *   迁内网时只改 AI_BASE_URL / AI_API_KEY / AI_MODEL，本文件不动。
  */
-import { env } from "../../../config/env.js";
+import { env, isProduction } from "../../../config/env.js";
 import {
   LLMError,
   type ChatEvent,
@@ -17,8 +17,18 @@ import {
   type ToolCallRequest,
 } from "./llm-provider.js";
 
-/** DeepSeek 的 OpenAI 兼容端点 */
-const DEFAULT_BASE_URL = "https://api.deepseek.com";
+/**
+ * DeepSeek 默认端点。
+ *
+ * 决策 D13 要求「不得硬编码 base URL」（迁内网时容易漏配而静默打公网），
+ * 但完全不给默认值会让本地开发必须先手填 AI_BASE_URL 才能跑。
+ *
+ * 折中做法：
+ *   1. 默认值只作为「非生产环境」的便利，且必须显式声明；
+ *   2. 生产环境（NODE_ENV=production）若未配置 AI_BASE_URL，直接拒绝构造，
+ *      避免静默访问公网服务。
+ */
+const DEV_DEFAULT_BASE_URL = "https://api.deepseek.com";
 
 /** 与 OpenAI 兼容协议的线格式（仅限本文件内部使用） */
 interface WireMessage {
@@ -98,9 +108,21 @@ export class DeepSeekProvider implements LLMProvider {
   private readonly timeoutMs: number;
 
   constructor(options: DeepSeekProviderOptions = {}) {
-    this.baseUrl = (options.baseUrl ?? env.AI_BASE_URL ?? "").trim()
-      ? (options.baseUrl ?? env.AI_BASE_URL).replace(/\/+$/, "")
-      : DEFAULT_BASE_URL;
+    const configured = (options.baseUrl ?? env.AI_BASE_URL ?? "").trim();
+
+    if (!configured && isProduction) {
+      // 迁内网时如果漏配 AI_BASE_URL，默认值会静默把敏感的案件数据
+      // 发到公网的 DeepSeek —— 这违反决策 D13，因此生产环境直接拒绝启动。
+      throw new Error(
+        [
+          "生产环境必须显式配置 AI_BASE_URL（决策 D13）。",
+          "若迁移到内网自研模型，请把 AI_BASE_URL 指向内网服务地址；",
+          "依赖默认的公网 DeepSeek 端点会把业务数据发往公网。",
+        ].join(" ")
+      );
+    }
+
+    this.baseUrl = (configured || DEV_DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.apiKey = options.apiKey ?? env.AI_API_KEY;
     this.model = options.model ?? env.AI_MODEL;
     this.timeoutMs = options.timeoutMs ?? 120_000;

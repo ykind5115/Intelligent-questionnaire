@@ -898,7 +898,9 @@ describe("审核 API（05 文档第 16 节）", () => {
     expect(res.status).toBe(200);
     const data = expectData(res) as Record<string, unknown>;
     expect(data["result"]).toBe("approved");
-    expect(data["responseStatus"]).toBe("submitted");
+    // 审核通过后答卷置为 reviewed（不再是 submitted）——
+    // 否则它会永远留在「待审核列表」里，审核人无法分辨真正待审项。
+    expect(data["responseStatus"]).toBe("reviewed");
     expect(data["instanceStatus"]).toBe("completed");
 
     const state = await readInstanceState(flow.instanceId);
@@ -916,6 +918,69 @@ describe("审核 API（05 文档第 16 节）", () => {
       where: { questionnaireInstanceId: flow.instanceId },
     });
     expect(audits.some((a) => a.toolName === "review_response")).toBe(true);
+  });
+
+  it("已通过的提交不再出现在待审核列表（回归：曾永远停留）", async () => {
+    const flow = await startFlow();
+    await submitFlow(flow);
+
+    const before = await call(
+      "GET",
+      "/api/v1/questionnaire-responses/review/pending?page=1&pageSize=100",
+      { userId: USERS.reviewer }
+    );
+    expect(before.status).toBe(200);
+    const beforeIds = (
+      expectData(before) as { items: { responseId: string }[] }
+    ).items.map((i) => i.responseId);
+    expect(beforeIds).toContain(flow.responseId);
+
+    await call(
+      "POST",
+      `/api/v1/questionnaire-responses/${flow.responseId}/review`,
+      { userId: USERS.reviewer, body: { result: "approved" } }
+    );
+
+    const after = await call(
+      "GET",
+      "/api/v1/questionnaire-responses/review/pending?page=1&pageSize=100",
+      { userId: USERS.reviewer }
+    );
+    const afterIds = (
+      expectData(after) as { items: { responseId: string }[] }
+    ).items.map((i) => i.responseId);
+    expect(afterIds).not.toContain(flow.responseId);
+  });
+
+  it("同一提交不能被重复审核（回归：曾可先 approved 再 rejected）", async () => {
+    const flow = await startFlow();
+    await submitFlow(flow);
+
+    const first = await call(
+      "POST",
+      `/api/v1/questionnaire-responses/${flow.responseId}/review`,
+      { userId: USERS.reviewer, body: { result: "approved" } }
+    );
+    expect(first.status).toBe(200);
+
+    // 第二次审核必须被拒，且不能把终态 completed 打回 returned
+    const second = await call(
+      "POST",
+      `/api/v1/questionnaire-responses/${flow.responseId}/review`,
+      { userId: USERS.reviewer, body: { result: "rejected" } }
+    );
+    expect(second.status).toBe(409);
+    expect(failureOf(second).code).toBe("INVALID_STATUS_TRANSITION");
+
+    const state = await readInstanceState(flow.instanceId);
+    expect(state?.status).toBe("completed");
+
+    // 审核记录只能有一条（不能出现 approved + rejected 互相矛盾）
+    const records = await prisma.reviewRecord.findMany({
+      where: { questionnaireResponseId: flow.responseId },
+    });
+    expect(records).toHaveLength(1);
+    expect(records[0]?.result).toBe("approved");
   });
 
   it("审核退回：response 回到 draft，实例 → returned，且允许重新填写", async () => {

@@ -337,6 +337,28 @@ export const reviewService = {
         );
       }
 
+      // ---- 幂等：同一份提交只能审一次 ----
+      // 早期实现只看 response.status，而 approved 分支不改 response.status，
+      // 于是同一提交可以被反复审核（甚至先 approved 再 rejected），
+      // 留下互相矛盾的审核记录并把终态 completed 打回 returned。
+      const existingReview = await tx.reviewRecord.findFirst({
+        where: { questionnaireResponseId: responseId },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, result: true, createdAt: true },
+      });
+      if (existingReview) {
+        throw new OperationError(
+          ErrorCode.INVALID_STATUS_TRANSITION,
+          `该提交已于 ${existingReview.createdAt.toISOString()} 审核过` +
+            `（结果：${existingReview.result}），不能重复审核`,
+          {
+            path: "responseId",
+            previousResult: existingReview.result,
+            previousReviewId: existingReview.id,
+          }
+        );
+      }
+
       const instance = await tx.questionnaireInstance.findUnique({
         where: { id: response.questionnaireInstanceId },
         select: { id: true, status: true },
@@ -345,6 +367,15 @@ export const reviewService = {
         throw new OperationError(
           ErrorCode.QUESTIONNAIRE_NOT_FOUND,
           `问卷实例不存在：${response.questionnaireInstanceId}`
+        );
+      }
+
+      // ---- 终态保护：已完成的问卷不能再被审核改变状态 ----
+      if (instance.status === "completed") {
+        throw new OperationError(
+          ErrorCode.INVALID_STATUS_TRANSITION,
+          "该问卷已完成审核（终态），不能再改变其状态",
+          { path: "status", status: instance.status }
         );
       }
 
@@ -360,15 +391,18 @@ export const reviewService = {
 
       const approved = input.result === "approved";
 
-      // 退回时把 submitted_at 清空：status 已经回到 draft，
-      // 继续保留「提交时间」会出现「未提交却有提交时间」的自相矛盾状态；
-      // 审核历史本身留在 review_records 里，不会丢。
-      const updatedResponse = approved
-        ? response
-        : await tx.questionnaireResponse.update({
-            where: { id: responseId },
-            data: { status: "draft", submittedAt: null },
-          });
+      // 审核通过后把答卷置为 reviewed：
+      //   若仍停在 submitted，它会永远出现在「待审核列表」里，
+      //   审核人无法分辨真正待审项（审计发现的缺陷）。
+      // 退回时置回 draft 并清空 submitted_at：
+      //   status 已回到 draft，继续保留提交时间会出现「未提交却有提交时间」
+      //   的自相矛盾状态；审核历史本身留在 review_records 里，不会丢。
+      const updatedResponse = await tx.questionnaireResponse.update({
+        where: { id: responseId },
+        data: approved
+          ? { status: "reviewed" }
+          : { status: "draft", submittedAt: null },
+      });
 
       const updatedInstance = await tx.questionnaireInstance.update({
         where: { id: instance.id },
