@@ -144,13 +144,46 @@ curl http://127.0.0.1:3000/healthz
 pnpm dev            # 开发模式（热重载）
 pnpm build          # 编译
 pnpm typecheck      # 类型检查
-pnpm test           # 单元测试
+pnpm test           # 全部测试（44 单元 + 146 集成）
 
 pnpm db:dev         # 启动本地数据库
 pnpm db:migrate     # 执行迁移
 pnpm db:seed        # 写入测试数据
 pnpm db:studio      # 可视化查看数据
 pnpm db:reset       # 重置数据库（会清空数据）
+```
+
+### 4.4 关于集成测试与数据库
+
+集成测试跑在**真实的本地数据库**上，`beforeAll/afterEach` 会自行清理它创建的数据。
+
+但有一个例外情况需要注意：
+
+```text
+如果某个测试文件在运行中整体崩溃（例如数据库进程意外退出、
+连接被中断），afterEach 就没有机会执行，会残留：
+  - ai_conversations / ai_messages
+  - questionnaire_templates / questionnaire_template_versions
+  - questionnaire_instances 及其 revisions
+```
+
+判断与恢复：
+
+```bash
+# 看是否有残留：正常情况下只应有 seed 的 2 个模板 + 1 个实例
+pnpm exec prisma studio
+
+# 彻底恢复干净基线（会清空所有数据并重新 seed）
+pnpm db:reset
+```
+
+**另外注意**：本地数据库由 `prisma dev` 提供服务，
+如果你用作业/进程管理器启动它，**终止该作业可能一并带走数据库进程**。
+表现为 `prisma dev ls` 显示 `not_running`，测试报
+`Connection terminated unexpectedly`。此时重新执行：
+
+```bash
+pnpm exec prisma dev -d
 ```
 
 ---
