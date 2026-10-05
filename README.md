@@ -50,10 +50,13 @@ AI 按本次案件的特殊需求修改【实例】
 | Questionnaire Operation 层（add/update/remove/move，纯函数） | ✅ 完成 |
 | Questionnaire Repository（乐观锁 + Revision + 审计） | ✅ 完成 |
 | Questionnaire Service（权限 D8 + 状态校验 D1 + 事务 + 幂等 D9） | ✅ 完成 |
-| 测试：44 个单元 + 24 个集成 | ✅ 完成 |
-| 7 个 AI Tool（snake_case → Operation 的适配层） | ⬜ 下一步 |
-| AI Orchestrator（LLM + Tool 循环 + SSE） | ⬜ |
-| REST API 路由层 | ⬜ |
+| 7 个 AI Tool + Tool Registry（含 JSON Schema 生成） | ✅ 完成 |
+| LLM Provider 抽象 + DeepSeek 实现（决策 D12） | ✅ 完成 |
+| AI Orchestrator（上下文 + Tool 循环 + 轮数上限 + 幂等） | ✅ 完成 |
+| 测试：44 单元 + 66 集成，共 110 例全绿 | ✅ 完成 |
+| REST API 路由层（除 /healthz 与 /api/v1/me 外） | ⬜ 下一步 |
+| AI 会话落库（ai_conversations / ai_messages 读写） | ⬜ |
+| SSE 流式输出 | ⬜ |
 | 下发 / 填写 / 审核闭环 | ⬜ |
 | 前端简要实现（结构树 + 对话 + 确认/下发） | ⬜ |
 | 人工编辑器（上线前兜底，决策 D3） | ⬜ 最后 |
@@ -71,6 +74,11 @@ Database   PostgreSQL（本机由 prisma dev 提供，决策 D7）
 Validation Zod
 Model      DeepSeek deepseek-v41-flash（决策 D12）
 ```
+
+> **模型接口调用需要 `AI_API_KEY`。** 未配置时不会崩溃，
+> 而是在真正调用模型时返回明确的 `AI_API_KEY_MISSING` 错误。
+> Tool 层、Service 层与全部 110 个测试都不需要真实 Key
+> （Orchestrator 测试用假 Provider 驱动）。
 
 **已预留的迁移能力（决策 D13）**：后期整体迁到内网、模型接口换成自研服务时，
 只需改 `.env` 里的 `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` 与 `DATABASE_URL`，
@@ -202,18 +210,30 @@ curl http://127.0.0.1:3000/api/v1/me \
 │   │   ├── client.ts        Prisma 客户端（含 pg adapter）
 │   │   └── transaction.ts   事务辅助
 │   ├── modules/
-│   │   └── questionnaire/
-│   │       ├── schema/questionnaire.schema.ts   问卷结构权威定义（Zod）
-│   │       ├── operations/  纯函数式结构变换（AI 与人工编辑共用）
-│   │       │   ├── add-section.ts / add-question.ts
-│   │       │   ├── update-section.ts / update-question.ts
-│   │       │   ├── remove-question.ts / move-question.ts
-│   │       │   ├── helpers.ts（order 重算、选项构造、最终校验）
-│   │       │   └── id-factory.ts（ID 由后端生成，测试可注入）
-│   │       ├── repository/questionnaire.repository.ts
-│   │       │   （乐观锁更新、Revision 快照、审计日志、幂等查询）
-│   │       └── service/questionnaire.service.ts
-│   │           （权限 + 状态校验 + 事务 + 幂等，REST 与 AI Tool 共用）
+│   │   ├── questionnaire/                    业务核心
+│   │   │   ├── schema/questionnaire.schema.ts   问卷结构权威定义（Zod）
+│   │   │   ├── operations/  纯函数式结构变换（AI 与人工编辑共用）
+│   │   │   │   ├── add-section.ts / add-question.ts
+│   │   │   │   ├── update-section.ts / update-question.ts
+│   │   │   │   ├── remove-question.ts / move-question.ts
+│   │   │   │   ├── helpers.ts（order 重算、选项构造、最终校验）
+│   │   │   │   └── id-factory.ts（ID 由后端生成，测试可注入）
+│   │   │   ├── repository/questionnaire.repository.ts
+│   │   │   │   （乐观锁更新、Revision 快照、审计日志、幂等查询）
+│   │   │   └── service/questionnaire.service.ts
+│   │   │       （权限 + 状态校验 + 事务 + 幂等，REST 与 AI Tool 共用）
+│   │   │
+│   │   └── ai/                               智能能力入口
+│   │       ├── tools/                        7 个增量 Tool
+│   │       │   ├── questionnaire.tools.ts    6 个写入 + 1 个读取
+│   │       │   ├── tool-registry.ts          注册表、runTool、JSON Schema 生成
+│   │       │   ├── shared.ts                 参数片段与 target_id 一致性校验
+│   │       │   └── types.ts                  ToolContext / ToolResult 契约
+│   │       ├── providers/                    LLM 抽象与实现（决策 D13）
+│   │       │   ├── llm-provider.ts           中立接口，无厂商概念
+│   │       │   └── deepseek.provider.ts      DeepSeek（OpenAI 兼容）
+│   │       ├── prompts/prompt-builder.ts     分层 Prompt 构建
+│   │       └── orchestrator/ai.orchestrator.ts  Tool 调用循环
 │   └── shared/
 │       ├── errors/          业务错误类型与错误码（含 D1 锁定码）
 │       ├── auth/            鉴权与当前用户上下文
@@ -222,7 +242,9 @@ curl http://127.0.0.1:3000/api/v1/me \
 ├── tests/
 │   ├── fixtures/            测试夹具
 │   ├── unit/                44 个单元测试（Operation 层，无数据库）
-│   └── integration/         24 个集成测试（真实数据库）
+│   └── integration/         66 个集成测试（真实数据库）
+│       ├── questionnaire/   Service：冻结、幂等、乐观锁、撤回
+│       └── ai/              Tool 与 Orchestrator（假 Provider 驱动）
 │
 ├── prisma7.config.ts        Prisma 7 配置（datasource URL 在这里）
 └── pnpm-workspace.yaml      pnpm 11 构建脚本放行（关键，勿删）
@@ -251,14 +273,38 @@ curl http://127.0.0.1:3000/api/v1/me \
             QuestionnaireSchema      PostgreSQL
 ```
 
+**AI 侧的额外一层：**
+
+```text
+用户自然语言
+     │
+     ▼
+AI Orchestrator  ── 构建分层 Prompt + 维护消息历史
+     │                 （MAX_TOOL_ROUNDS = 8，触顶收尾不报错）
+     ▼
+LLMProvider 抽象 ── DeepSeek（OpenAI 兼容）；迁内网只需换实现
+     │  Tool Call
+     ▼
+runTool  ── 查表 → Zod 校验参数 → Tool.execute
+     │        每次调用生成独立 operation_id（决策 D9）
+     ▼
+Tool 适配层  ── snake_case 参数 → camelCase Operation
+     │         + target_id 与会话一致性校验
+     ▼
+QuestionnaireService（同上，权限与状态由后端强制）
+```
+
 **关键约束：**
 
 - `Operation` 层是纯函数：入参 `(schema, input)`，返回新 schema，
   不碰数据库、不碰 HTTP、不依赖 AI —— 因此可被单元测试完整覆盖。
 - `Service` 是唯一业务入口：REST 与 AI Tool 都调用它，不存在两套逻辑。
 - 只有 `Repository` 能碰数据库。
+- `LLMProvider` 接口中立，不含任何厂商专有概念（决策 D13）。
 - 所有结构修改在返回前都会经过 `questionnaireSchema.parse()`，
   因此**不可能有非法结构落库**。
+- **Prompt 只承担行为约束，权限与状态校验一律在代码层** ——
+  模型没有绕过权限的可能。
 
 ---
 

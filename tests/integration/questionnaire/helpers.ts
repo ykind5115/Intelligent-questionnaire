@@ -135,3 +135,34 @@ export async function countArtifacts(instanceId: string) {
   ]);
   return { revisions, audits };
 }
+
+/**
+ * 创建一条真实的 AI 会话记录。
+ *
+ * 为什么测试要用真实 conversation：
+ *   ai_tool_executions.conversation_id 是 uuid 且有外键约束，
+ *   随意编一个字符串会在写审计时失败。
+ *   这正说明「ID 字段必须在入口校验格式」是必要的。
+ */
+export async function createTestConversation(
+  instanceId: string,
+  options: { scene?: string } = {}
+): Promise<string> {
+  const id = newId();
+  await prisma.aiConversation.create({
+    data: {
+      id,
+      userId: USERS.dispatcher,
+      scene: options.scene ?? "modify_questionnaire",
+      targetType: "questionnaire_instance",
+      targetId: instanceId,
+      status: "active",
+    },
+  });
+  return id;
+}
+
+export async function deleteTestConversation(id: string): Promise<void> {
+  await prisma.aiToolExecution.deleteMany({ where: { conversationId: id } });
+  await prisma.aiConversation.deleteMany({ where: { id } });
+}

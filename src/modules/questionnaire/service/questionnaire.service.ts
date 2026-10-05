@@ -205,15 +205,28 @@ function assertInstanceWritable(instance: InstanceRecord): void {
  *   invalid input syntax for type uuid —— 此时错误码已丢失（变成 SYSTEM_ERROR），
  *   调用方无法判断究竟是幂等冲突、校验失败还是系统故障。
  *
- * 因此在这里提前失败，并给出明确错误码。
+ * 更严重的是：审计写入在同一个事务内，
+ * 因此这个「日志格式错误」会把已经成功的业务改动一起回滚，
+ * 表现为「结构明明改对了，却报系统错误且没保存」。
  */
-function assertValidOperationId(operationId: string | undefined): void {
-  if (operationId !== undefined && !uuidValidate(operationId)) {
+function assertUuid(
+  value: string | undefined,
+  fieldName: string
+): void {
+  if (value !== undefined && !uuidValidate(value)) {
     throw validationError(
-      `operationId 必须是合法 UUID，收到：${operationId}`,
-      { path: "operationId", operationId }
+      `${fieldName} 必须是合法 UUID，收到：${value}`,
+      { path: fieldName, value }
     );
   }
+}
+
+/** 校验上下文中所有「要落库的 ID 字段」格式 */
+function assertServiceContext(ctx: ServiceContext): void {
+  assertUuid(ctx.operationId, "operationId");
+  assertUuid(ctx.conversationId, "conversationId");
+  assertUuid(ctx.messageId, "messageId");
+  assertUuid(ctx.userId, "userId");
 }
 
 // ============================================================
@@ -306,7 +319,7 @@ export const questionnaireService = {
     options: { expectedRevision?: number } = {}
   ): Promise<ApplyResult> {
     assertCanWriteStructure(ctx);
-    assertValidOperationId(ctx.operationId);
+    assertServiceContext(ctx);
 
     const operationId = ctx.operationId ?? newId();
     const ids = ctx.idFactory ?? uuidIdFactory;
@@ -434,7 +447,7 @@ export const questionnaireService = {
     ctx: ServiceContext
   ): Promise<ApplyResult> {
     assertCanWriteStructure(ctx);
-    assertValidOperationId(ctx.operationId);
+    assertServiceContext(ctx);
 
     const operationId = ctx.operationId ?? newId();
     const ids = ctx.idFactory ?? uuidIdFactory;
@@ -552,7 +565,7 @@ export const questionnaireService = {
     reason?: string
   ): Promise<{ id: string; status: string }> {
     assertCanWriteStructure(ctx);
-    assertValidOperationId(ctx.operationId);
+    assertServiceContext(ctx);
 
     const WITHDRAWABLE = [
       "dispatched",
