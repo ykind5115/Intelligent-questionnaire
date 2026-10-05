@@ -22,6 +22,7 @@ import {
   type ToolContext,
 } from "../../../src/modules/ai/tools/index.js";
 import { newId } from "../../../src/shared/utils/id.js";
+import { templateService } from "../../../src/modules/questionnaire/service/template.service.js";
 import {
   CTX,
   USERS,
@@ -30,6 +31,9 @@ import {
   deleteTestInstance,
   readInstanceState,
 } from "../questionnaire/helpers.js";
+
+/** 场景矩阵测试创建的模板，测试后清理 */
+const templateIds: string[] = [];
 
 /** 构造 ToolContext（决策 D9：一次 Tool 调用一个 operation_id） */
 function toolCtx(
@@ -60,14 +64,36 @@ function toolCtxWithFixedOperation(
 
 let instanceId = "";
 
+/** 清理场景矩阵测试创建的模板与版本 */
+async function cleanupTemplates(): Promise<void> {
+  if (templateIds.length === 0) return;
+  await prisma.questionnaireTemplate.updateMany({
+    where: { id: { in: templateIds } },
+    data: { currentVersionId: null },
+  });
+  await prisma.questionnaireTemplateVersion.deleteMany({
+    where: { templateId: { in: templateIds } },
+  });
+  await prisma.questionnaireTemplate.deleteMany({
+    where: { id: { in: templateIds } },
+  });
+  // 场景矩阵的写入会留审计记录（没有实例归属）
+  await prisma.aiToolExecution.deleteMany({
+    where: { questionnaireInstanceId: null, source: "ai_tool" },
+  });
+  templateIds.length = 0;
+}
+
 afterEach(async () => {
   if (instanceId) {
     await deleteTestInstance(instanceId);
     instanceId = "";
   }
+  await cleanupTemplates();
 });
 
 afterAll(async () => {
+  await cleanupTemplates();
   await prisma.$disconnect();
 });
 
@@ -268,17 +294,145 @@ describe("runTool 的参数与上下文校验", () => {
     expect(sections.map((s) => s.title)).toContain("省略 target_id");
   });
 
-  it("create_template 场景下写入类工具被拒绝", async () => {
+  /**
+   * 场景校验矩阵（03 文档第 36.0 节）。
+   *
+   * 注意：本文件早期版本在这里断言「create_template 场景下写入类工具被拒绝」，
+   * 那是**错误的**：AI 从零创建问卷走的正是 create_template + template（草稿版本），
+   * 把 template 目标一并拒绝会让「AI 创建问卷」整条链路不可用。
+   * 正确的规则是「不能写已发布的正式模板」，而不是「不能写模板」。
+   */
+  it("create_template + template（草稿版本）允许写入", async () => {
+    const template = await templateService.createTemplate(
+      { name: `场景矩阵-${newId().slice(0, 8)}` },
+      { userId: USERS.admin, roles: ["template_admin"], source: "rest" }
+    );
+    templateIds.push(template.id);
+
+    const draft = await templateService.createVersion(
+      template.id,
+      {},
+      { userId: USERS.admin, roles: ["template_admin"], source: "rest" }
+    );
+
+    const result = await runTool(
+      "add_section",
+      { title: "基本信息" },
+      toolCtx(draft.id, {
+        scene: "create_template",
+        targetType: "template",
+        userId: USERS.admin,
+        roles: ["template_admin"],
+      })
+    );
+
+    expect(result.success).toBe(true);
+    // 真的写进了模板草稿
+    const after = await prisma.questionnaireTemplateVersion.findUnique({
+      where: { id: draft.id },
+      select: { schema: true },
+    });
+    const sections = (after?.schema as { sections: { title: string }[] })
+      .sections;
+    expect(sections.map((s) => s.title)).toContain("基本信息");
+  });
+
+  it("create_template + instance（错配）被拒绝", async () => {
+    const inst = await createTestInstance();
+    instanceId = inst.id;
+
     const result = await runTool(
       "add_section",
       { title: "x" },
-      toolCtx("00000000-0000-0000-0000-000000000000", {
-        targetType: "template",
+      toolCtx(inst.id, {
         scene: "create_template",
+        targetType: "questionnaire_instance",
       })
     );
+
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe(ErrorCode.INVALID_PARAMETER);
+  });
+
+  it("modify_questionnaire + template（试图改正式模板）被拒绝", async () => {
+    const template = await templateService.createTemplate(
+      { name: `场景矩阵2-${newId().slice(0, 8)}` },
+      { userId: USERS.admin, roles: ["template_admin"], source: "rest" }
+    );
+    templateIds.push(template.id);
+
+    const draft = await templateService.createVersion(
+      template.id,
+      {},
+      { userId: USERS.admin, roles: ["template_admin"], source: "rest" }
+    );
+
+    const result = await runTool(
+      "add_section",
+      { title: "x" },
+      toolCtx(draft.id, {
+        scene: "modify_questionnaire",
+        targetType: "template",
+      })
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe(ErrorCode.INVALID_PARAMETER);
+  });
+
+  it("get_questionnaire 可以读模板草稿（AI 创建问卷的前提）", async () => {
+    const template = await templateService.createTemplate(
+      { name: `场景矩阵3-${newId().slice(0, 8)}` },
+      { userId: USERS.admin, roles: ["template_admin"], source: "rest" }
+    );
+    templateIds.push(template.id);
+
+    const draft = await templateService.createVersion(
+      template.id,
+      {
+        schema: {
+          id: newId(),
+          title: "带内容的草稿",
+          version: 1,
+          sections: [
+            {
+              id: "sec_a",
+              title: "分组A",
+              order: 1,
+              questions: [
+                {
+                  id: "q_a",
+                  type: "text",
+                  title: "题A",
+                  required: true,
+                  order: 1,
+                },
+              ],
+            },
+          ],
+        },
+      },
+      { userId: USERS.admin, roles: ["template_admin"], source: "rest" }
+    );
+
+    const result = await runTool(
+      "get_questionnaire",
+      {},
+      toolCtx(draft.id, {
+        scene: "create_template",
+        targetType: "template",
+        userId: USERS.admin,
+        roles: ["template_admin"],
+      })
+    );
+
+    expect(result.success).toBe(true);
+    const data = result.data as {
+      questionnaire: { sections: { title: string }[] };
+      revisionKind: string;
+    };
+    expect(data.revisionKind).toBe("template_version_no");
+    expect(data.questionnaire.sections.map((s) => s.title)).toEqual(["分组A"]);
   });
 });
 

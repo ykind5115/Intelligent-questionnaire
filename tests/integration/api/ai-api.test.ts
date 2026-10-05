@@ -18,16 +18,11 @@
  */
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import express, { type Express } from "express";
+import type { Express } from "express";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { prisma } from "../../../src/database/client.js";
-import {
-  errorHandler,
-  notFoundHandler,
-} from "../../../src/app/error-handler.js";
-import { devAuthMiddleware } from "../../../src/shared/auth/auth.middleware.js";
-import { createAiRouter } from "../../../src/modules/ai/routes.js";
+import { createApp } from "../../../src/app/app.js";
 import { aiConversationRepository } from "../../../src/modules/ai/repository/ai-conversation.repository.js";
 import type {
   ChatMessage,
@@ -108,15 +103,10 @@ let server: Server;
 let baseUrl = "";
 
 beforeAll(async () => {
-  // 与 src/app/routes.ts 的装配方式一致：
-  // 全局错误处理必须注册在路由之后，否则 OperationError 无法映射成
-  // 404 / 403 / 409 / 422，而会变成 500。
-  app = express();
-  app.use(express.json({ limit: "2mb" }));
-  app.use(devAuthMiddleware());
-  app.use(AI_BASE, createAiRouter());
-  app.use(notFoundHandler);
-  app.use(errorHandler);
+  // 用**真实的应用装配**（src/app/app.ts 的 createApp），
+  // 而不是手搭一个 mini app —— 这样测的是线上真正跑的那套中间件与路由，
+  // 避免「测试里手搭的 app 与真实 app 行为不一致」造成的盲区。
+  app = createApp();
 
   server = createServer(app);
   await new Promise<void>((resolve) => {
@@ -196,6 +186,8 @@ async function createModifyConversation(instanceId: string): Promise<string> {
 
 const createdInstances: string[] = [];
 const createdConversations: string[] = [];
+/** 场景测试创建的模板（AI 建模板那一组用），统一在这里声明以便 cleanup 处理 */
+const createdTemplateIds: string[] = [];
 
 /**
  * 删除会话。
@@ -211,6 +203,26 @@ async function deleteConversation(id: string): Promise<void> {
   await prisma.aiConversation.deleteMany({ where: { id } });
 }
 
+/** 清理模板草稿场景创建的数据 */
+async function cleanupTemplates(): Promise<void> {
+  if (createdTemplateIds.length === 0) return;
+  const ids = [...createdTemplateIds];
+  createdTemplateIds.length = 0;
+
+  await prisma.questionnaireTemplate.updateMany({
+    where: { id: { in: ids } },
+    data: { currentVersionId: null },
+  });
+  await prisma.questionnaireTemplateVersion.deleteMany({
+    where: { templateId: { in: ids } },
+  });
+  await prisma.questionnaireTemplate.deleteMany({ where: { id: { in: ids } } });
+  // 模板场景的写入审计没有实例归属，单独清理
+  await prisma.aiToolExecution.deleteMany({
+    where: { questionnaireInstanceId: null, source: "ai_tool" },
+  });
+}
+
 async function cleanup(): Promise<void> {
   while (createdConversations.length > 0) {
     const id = createdConversations.pop();
@@ -220,6 +232,7 @@ async function cleanup(): Promise<void> {
     const id = createdInstances.pop();
     if (id) await deleteTestInstance(id);
   }
+  await cleanupTemplates();
 }
 
 afterEach(cleanup);
@@ -592,5 +605,225 @@ describe("鉴权", () => {
     });
     expect(res.status).toBe(401);
     expect(res.body.error?.code).toBe("UNAUTHORIZED");
+  });
+});
+
+// ============================================================
+// 7. AI 创建模板（create_template）与 commit
+//
+// 这一组是回归测试：早期实现把 template 目标一并拒绝，
+// 导致「AI 从零创建问卷」整条链路不可用，
+// 而当时的测试还把这种错误行为断言成了正确。
+// ============================================================
+
+
+
+/** 用 API 建一个模板 + 草稿版本，返回版本 id */
+async function createDraftVersion(): Promise<string> {
+  const t = await request("POST", "/api/v1/questionnaire-templates", {
+    userId: USERS.admin,
+    body: { name: `AI 建模板测试-${Date.now()}` },
+  });
+  expect(t.status).toBe(201);
+  const templateId = t.body.data?.["id"] as string;
+  createdTemplateIds.push(templateId);
+
+  const v = await request(
+    "POST",
+    `/api/v1/questionnaire-templates/${templateId}/versions`,
+    { userId: USERS.admin, body: {} }
+  );
+  expect(v.status).toBe(201);
+  return v.body.data?.["id"] as string;
+}
+
+describe("AI 创建模板（create_template 场景）", () => {
+  it("可以创建会话（targetType=template，绑草稿版本）", async () => {
+    const versionId = await createDraftVersion();
+
+    const res = await request("POST", `${AI_BASE}/conversations`, {
+      userId: USERS.admin,
+      body: {
+        scene: "create_template",
+        targetType: "template",
+        targetId: versionId,
+      },
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data?.["scene"]).toBe("create_template");
+    expect(res.body.data?.["targetType"]).toBe("template");
+  });
+
+  it("通过对话让 AI 往模板里写分组和问题，并落库", async () => {
+    const versionId = await createDraftVersion();
+
+    const conv = await request("POST", `${AI_BASE}/conversations`, {
+      userId: USERS.admin,
+      body: {
+        scene: "create_template",
+        targetType: "template",
+        targetId: versionId,
+      },
+    });
+    const conversationId = conv.body.data?.["conversationId"] as string;
+
+    // 假 Provider：建一个分组后收尾
+    // （不在此处 add_question —— 真实模型要从上一轮 Tool Result 里取 section_id，
+    //   在脚本化的假 Provider 里无法预知该 id；针对「依赖链」的验证
+    //   放在 tests/integration/ai/tools.test.ts 与 orchestrator.test.ts）
+    app.locals.aiProvider = new ScriptedProvider([
+      toolCallReply([
+        { id: "c1", name: "add_section", args: { title: "基本信息" } },
+      ]),
+      { content: "已建立基础问卷。", toolCalls: [], model: "scripted" },
+    ]);
+
+    const msg = await request(
+      "POST",
+      `${AI_BASE}/conversations/${conversationId}/messages`,
+      {
+        userId: USERS.admin,
+        body: { content: "帮我做一个无人机黑飞核查问卷，先要一个基本信息分组。" },
+      }
+    );
+
+    expect(msg.status).toBe(200);
+    expect(msg.body.success).toBe(true);
+
+    // 关键断言：模板草稿里**真的**被写进了分组
+    // （这正是修复前完全做不到的事）
+    const version = await prisma.questionnaireTemplateVersion.findUnique({
+      where: { id: versionId },
+      select: { schema: true, status: true },
+    });
+    const sections = (version?.schema as { sections: { title: string }[] })
+      .sections;
+    expect(sections.map((s) => s.title)).toContain("基本信息");
+    expect(version?.status).toBe("draft");
+
+    delete app.locals.aiProvider;
+  });
+
+  it("commit：结构非空才允许保存，且只产草稿不自动发布", async () => {
+    const versionId = await createDraftVersion();
+
+    const conv = await request("POST", `${AI_BASE}/conversations`, {
+      userId: USERS.admin,
+      body: {
+        scene: "create_template",
+        targetType: "template",
+        targetId: versionId,
+      },
+    });
+    const conversationId = conv.body.data?.["conversationId"] as string;
+
+    // 先试空问卷 commit → 422
+    const empty = await request(
+      "POST",
+      `${AI_BASE}/conversations/${conversationId}/commit`,
+      {
+        userId: USERS.admin,
+        body: { name: "无人机黑飞核查问卷" },
+      }
+    );
+    expect(empty.status).toBe(422);
+    expect(empty.body.error?.code).toBe("VALIDATION_ERROR");
+
+    // 用假 Provider 建一个分组
+    app.locals.aiProvider = new ScriptedProvider([
+      toolCallReply([
+        { id: "c1", name: "add_section", args: { title: "基本信息" } },
+      ]),
+      { content: "已建立分组。", toolCalls: [], model: "scripted" },
+    ]);
+    await request("POST", `${AI_BASE}/conversations/${conversationId}/messages`, {
+      userId: USERS.admin,
+      body: { content: "先建一个基本信息分组" },
+    });
+    delete app.locals.aiProvider;
+
+    // 只有分组、没有问题时仍不允许保存（避免产出空模板）
+    const noQuestion = await request(
+      "POST",
+      `${AI_BASE}/conversations/${conversationId}/commit`,
+      { userId: USERS.admin, body: {} }
+    );
+    expect(noQuestion.status).toBe(422);
+
+    // 直接补一个问题到草稿里（模拟 AI 已加题），然后 commit
+    const draft = await prisma.questionnaireTemplateVersion.findUnique({
+      where: { id: versionId },
+      select: { schema: true },
+    });
+    const schema = draft?.schema as {
+      id: string;
+      title: string;
+      version: number;
+      sections: {
+        id: string;
+        title: string;
+        order: number;
+        questions: unknown[];
+      }[];
+    };
+    schema.sections[0]!.questions.push({
+      id: "q_name",
+      type: "text",
+      title: "姓名",
+      required: true,
+      order: 1,
+    });
+    await prisma.questionnaireTemplateVersion.update({
+      where: { id: versionId },
+      data: { schema: schema as object },
+    });
+
+    const committed = await request(
+      "POST",
+      `${AI_BASE}/conversations/${conversationId}/commit`,
+      {
+        userId: USERS.admin,
+        body: { name: "无人机黑飞核查问卷", changeNote: "AI 生成初版" },
+      }
+    );
+
+    expect(committed.status).toBe(201);
+    const data = committed.body.data as Record<string, unknown>;
+    // 关键：commit 只产草稿，不自动发布（发布仍须走 publish 接口）
+    expect(data["status"]).toBe("draft");
+    expect(data["templateVersionId"]).toBe(versionId);
+
+    // 模板名称被提交时更新
+    const template = await prisma.questionnaireTemplate.findFirst({
+      where: { id: data["templateId"] as string },
+      select: { name: true, status: true, currentVersionId: true },
+    });
+    expect(template?.name).toBe("无人机黑飞核查问卷");
+    expect(template?.status).not.toBe("published");
+    expect(template?.currentVersionId).toBeNull();
+  });
+
+  it("commit：modify_questionnaire 会话不允许 commit", async () => {
+    const inst = await createTestInstance();
+    createdInstances.push(inst.id);
+
+    const conv = await request("POST", `${AI_BASE}/conversations`, {
+      body: {
+        scene: "modify_questionnaire",
+        targetType: "questionnaire_instance",
+        targetId: inst.id,
+      },
+    });
+    const conversationId = conv.body.data?.["conversationId"] as string;
+
+    const res = await request(
+      "POST",
+      `${AI_BASE}/conversations/${conversationId}/commit`,
+      { body: {} }
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.error?.code).toBe("INVALID_OPERATION");
   });
 });

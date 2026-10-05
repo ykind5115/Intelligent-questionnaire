@@ -15,7 +15,7 @@ import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
 import { toolSuccess, toServiceContext } from "./types.js";
 import {
-  assertInstanceScene,
+  assertWritableScene,
   optionInputSchema,
   questionTypeSchema,
   resolveTargetId,
@@ -37,21 +37,31 @@ function makeTool<T extends z.ZodTypeAny, R>(
   return def;
 }
 
-/** 把 payload 应用到实例并返回统一结果（写类工具的公共收尾） */
+/**
+ * 把一次写操作落到正确的目标上。
+ *
+ * 依据 03 文档第 36.0 节，写目标有两类：
+ *   create_template       → Template Draft（走 applyToTemplateVersion）
+ *   modify_questionnaire  → Questionnaire Instance（走 applyToInstance）
+ *
+ * 这也是「AI 创建问卷」与「AI 修改问卷」复用同一套 7 个工具的方式：
+ * 区别只在目标类型，不在工具本身（03 文档第 35 节）。
+ */
 async function applyWrite(
   payload: OperationPayload,
   context: Parameters<ToolDefinition["execute"]>[1],
   deps: Parameters<ToolDefinition["execute"]>[2],
   targetId: string
 ) {
-  const result = await deps.service.applyToInstance(
-    targetId,
-    payload,
-    {
-      ...toServiceContext(context),
-      auditToolName: payload.name,
-    }
-  );
+  const serviceCtx = {
+    ...toServiceContext(context),
+    auditToolName: payload.name,
+  };
+
+  const result =
+    context.targetType === "template"
+      ? await deps.service.applyToTemplateVersion(targetId, payload, serviceCtx)
+      : await deps.service.applyToInstance(targetId, payload, serviceCtx);
 
   return toolSuccess(result.details, context.operationId, result.revision);
 }
@@ -72,6 +82,27 @@ export const getQuestionnaireTool = makeTool({
   async execute(input, context, deps) {
     try {
       const targetId = resolveTargetId(input.target_id, context);
+
+      // 目标有两类：模板草稿（AI 创建问卷）或问卷实例（AI 修改问卷）
+      if (context.targetType === "template") {
+        const version = await deps.service.getTemplateVersionForEditing(
+          targetId,
+          toServiceContext(context)
+        );
+
+        return toolSuccess(
+          {
+            questionnaire: version.schema,
+            // 模板版本没有 revision 概念，用 versionNo 表达"第几版"
+            revision: version.versionNo,
+            revisionKind: "template_version_no",
+            status: version.status,
+          },
+          context.operationId,
+          version.versionNo
+        );
+      }
+
       const instance = await deps.service.getInstance(
         targetId,
         toServiceContext(context)
@@ -91,6 +122,7 @@ export const getQuestionnaireTool = makeTool({
         {
           questionnaire: instance.currentSchema,
           revision: instance.currentRevision,
+          revisionKind: "instance_revision",
           status: instance.status,
         },
         context.operationId,
@@ -124,7 +156,7 @@ export const addSectionTool = makeTool({
 
   async execute(input, context, deps) {
     try {
-      assertInstanceScene(context);
+      assertWritableScene(context);
       const targetId = resolveTargetId(input.target_id, context);
       return await applyWrite(
         {
@@ -162,7 +194,7 @@ export const updateSectionTool = makeTool({
 
   async execute(input, context, deps) {
     try {
-      assertInstanceScene(context);
+      assertWritableScene(context);
       const targetId = resolveTargetId(input.target_id, context);
       return await applyWrite(
         {
@@ -212,7 +244,7 @@ export const addQuestionTool = makeTool({
 
   async execute(input, context, deps) {
     try {
-      assertInstanceScene(context);
+      assertWritableScene(context);
       const targetId = resolveTargetId(input.target_id, context);
       return await applyWrite(
         {
@@ -264,7 +296,7 @@ export const updateQuestionTool = makeTool({
 
   async execute(input, context, deps) {
     try {
-      assertInstanceScene(context);
+      assertWritableScene(context);
       const targetId = resolveTargetId(input.target_id, context);
       return await applyWrite(
         {
@@ -306,7 +338,7 @@ export const removeQuestionTool = makeTool({
 
   async execute(input, context, deps) {
     try {
-      assertInstanceScene(context);
+      assertWritableScene(context);
       const targetId = resolveTargetId(input.target_id, context);
       return await applyWrite(
         {
@@ -346,7 +378,7 @@ export const moveQuestionTool = makeTool({
 
   async execute(input, context, deps) {
     try {
-      assertInstanceScene(context);
+      assertWritableScene(context);
       const targetId = resolveTargetId(input.target_id, context);
       return await applyWrite(
         {

@@ -34,6 +34,7 @@ import {
   type LLMProvider,
 } from "../providers/index.js";
 import { questionnaireService } from "../../questionnaire/service/questionnaire.service.js";
+import { templateService } from "../../questionnaire/service/template.service.js";
 import { questionnaireRepository } from "../../questionnaire/repository/questionnaire.repository.js";
 
 export const SUPPORTED_SCENES = [
@@ -459,6 +460,66 @@ export const aiConversationService = {
     await this.getConversation(conversationId, ctx);
     await aiConversationRepository.updateStatus(conversationId, "closed");
     return { id: conversationId, status: "closed" };
+  },
+
+  /**
+   * 提交 AI 生成的问卷（05 文档第 33 节：AI 生成模板的**唯一保存路径**）。
+   *
+   * 依据 05 文档第 33.1 与 34 节：
+   *   AI 对话过程中写的是 Draft Template；
+   *   用户确认后由本方法把它定格为模板版本，并可与名称/说明一起保存。
+   *
+   * 实现说明（重要）：
+   *   对话的写入目标**本身就是**一个 questionnaire_template_versions 记录
+   *   （status = draft），所以「提交」不是新建版本，而是：
+   *     校验结构非空且合法 → 落定版本信息（名称/说明/changeNote）→ 返回该版本。
+   *   之后再由 template_admin 走 POST .../publish 发布为正式版本。
+   *   这样不会因为一次 commit 就凭空多出一个空版本。
+   */
+  async commitConversation(
+    conversationId: string,
+    input: {
+      name?: string;
+      description?: string;
+      changeNote?: string;
+    },
+    ctx: AiServiceContext
+  ): Promise<{
+    templateId: string;
+    templateVersionId: string;
+    versionNo: number;
+    status: string;
+  }> {
+    const conversation = await this.getConversation(conversationId, ctx);
+
+    if (conversation.scene !== "create_template") {
+      throw new OperationError(
+        ErrorCode.INVALID_OPERATION,
+        `只有 create_template 会话可以 commit，当前 scene=${conversation.scene}`
+      );
+    }
+    if (conversation.targetType !== "template" || !conversation.targetId) {
+      throw new OperationError(
+        ErrorCode.INVALID_OPERATION,
+        "该会话没有绑定模板草稿版本，无法提交"
+      );
+    }
+
+    // 复用模板服务：它负责「只有 draft 可写」「version_no 由后端计算」等规则
+    const committed = await templateService.commitDraftVersion(
+      conversation.targetId,
+      input,
+      {
+        userId: ctx.userId,
+        roles: ctx.roles,
+        source: "ai_tool",
+        auditToolName: "commit_conversation",
+      }
+    );
+
+    await aiConversationRepository.updateStatus(conversationId, "committed");
+
+    return committed;
   },
 
   /** 供测试与内部使用：直接产出一个 operationId */

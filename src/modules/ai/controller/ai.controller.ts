@@ -73,8 +73,21 @@ const conversationParams = z.object({
   id: z.string().min(1),
 });
 
+/**
+ * 提交 AI 生成的问卷（05 文档第 34 节）。
+ *
+ * 名称/说明/变更说明都可选：对话过程中模板已带着一个占位名称，
+ * 用户确认时可以在这里改成正式名称。
+ */
+const commitBody = z.object({
+  name: z.string().min(1).max(200).optional(),
+  description: z.string().max(2000).optional(),
+  changeNote: z.string().max(2000).optional(),
+});
+
 type CreateConversationBody = z.infer<typeof createConversationBody>;
 type SendMessageBody = z.infer<typeof sendMessageBody>;
+type CommitBody = z.infer<typeof commitBody>;
 
 // ============================================================
 // 假 Provider 注入点（仅供测试与本地联调）
@@ -263,6 +276,32 @@ export function createAiRouter(): Router {
       );
 
       sendSuccess(req, res, result);
+    })
+  );
+
+  // ---- 提交 AI 生成的问卷（create_template 会话的唯一保存路径） ----
+  router.post(
+    "/conversations/:id/commit",
+    validate({ params: conversationParams, body: commitBody.optional() }),
+    asyncHandler(async (req: Request, res: Response) => {
+      const { id } = req.params as z.infer<typeof conversationParams>;
+      const body = (req.body ?? {}) as CommitBody;
+
+      const result = await aiConversationService.commitConversation(
+        id,
+        {
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.description !== undefined
+            ? { description: body.description }
+            : {}),
+          ...(body.changeNote !== undefined
+            ? { changeNote: body.changeNote }
+            : {}),
+        },
+        aiContextOf(req)
+      );
+
+      sendCreated(req, res, result);
     })
   );
 

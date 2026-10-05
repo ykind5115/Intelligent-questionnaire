@@ -3273,7 +3273,7 @@ SSE 流式输出
 12. 实现第一个 Tool                           ✅
 13. 完成 AI → Tool → DB                       ✅（假 Provider 驱动真实 Tool→Service→DB）
 14. 实现全部 V1 Tool                          ✅（7 个，无宏工具）
-15. 实现 AI 创建问卷                          🟡 链路已通；需接真实模型端到端验证
+15. 实现 AI 创建问卷                          ✅（create_template 场景可写模板草稿；commit 端点已实现）
 16. 实现 Template → Instance                  ✅（克隆 schema + 写 Revision 1）
 17. 实现 AI 修改 Instance                     🟡 链路已通；需接真实模型端到端验证
 18. 接入下发 / 填写 / 审核                    ✅
@@ -3287,8 +3287,7 @@ SSE 流式输出
 
 ```text
 pnpm typecheck   → 通过
-pnpm test        → 190 个测试通过（44 单元 + 146 集成，真实数据库）
-                   连续两遍全绿
+pnpm test        → 全部测试通过（单元 + 集成，真实数据库）
 ```
 
 **尚未验证的部分：**
@@ -3297,4 +3296,33 @@ pnpm test        → 190 个测试通过（44 单元 + 146 集成，真实数据
 真实模型端到端对话未验证（需要有效的 AI_API_KEY）。
 链路每一段都已独立验证，但「真实 DeepSeek 返回的 tool_calls
 能被正确解析并驱动业务」只有接上真 Key 才能最终确认。
+```
+
+## 70.3 一次审计修正记录（值得留档）
+
+2026-10-05 对已完成代码做了一次全面审计（需求符合度 / 代码逻辑 / 授权 / 并发），
+发现并修复了若干缺陷。其中一条对流程有警示意义：
+
+```text
+缺陷：AI 创建模板整条链路不可用
+  1. tools/shared.ts 的 assertInstanceScene 把 targetType=template 一并拒绝，
+     而 03 文档第 36.0 节明确规定 create_template + template（草稿版本）是允许的；
+  2. applyToTemplateVersion 实现完备却零调用者（死代码）；
+  3. POST /ai/conversations/{id}/commit 完全不存在。
+
+为什么没被发现：测试**断言了错误行为**
+  tests/integration/ai/tools.test.ts 里写着
+  it("create_template 场景下写入类工具被拒绝", ...) → 期望 INVALID_PARAMETER
+  于是 190 个测试全绿，却掩盖了「AI 根本建不了模板」。
+```
+
+教训（已据此调整做法）：
+
+```text
+1. 测试必须断言**需求要求的行为**，而不是断言"当前代码的行为"；
+   否则测试会把 bug 固化成规范。
+2. 进度表里的"链路已通"必须指明确切链路，不能从"实例侧通了"外推到"模板侧也通了"。
+3. 授权测试不能只测纵向越权（角色能不能做某类操作），
+   必须同时测横向越权（同角色能不能操作**别人**的数据）——
+   后者此前一处都没有。
 ```

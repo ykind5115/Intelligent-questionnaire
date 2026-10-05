@@ -60,11 +60,37 @@ export function resolveTargetId(
   return context.targetId;
 }
 
-/** 场景校验：写入类 Tool 只能在实例场景下使用 */
-export function assertInstanceScene(context: ToolContext): void {
-  if (context.targetType !== "questionnaire_instance") {
+/**
+ * 场景校验：写入类 Tool 只能用于「可写目标」。
+ *
+ * 依据 docs/03-questionnaire_schema_ai_tool_calling .md 第 36.0 节：
+ *
+ *   | Scene                 | target_type              | 是否允许 |
+ *   | create_template       | template（草稿版本）      | ✅ 允许  |
+ *   | create_template       | template_version（已发布）| ❌ 拒绝  |
+ *   | modify_questionnaire  | questionnaire_instance   | ✅ 允许  |
+ *   | modify_questionnaire  | template_version（正式模板）| ❌ 拒绝 |
+ *
+ * 也就是说：**AI 可以写「模板草稿版本」**（这正是 AI 从零创建问卷的路径），
+ * 但不允许写「已发布的正式模板」。
+ *
+ * 注意：本文档早期实现曾用一句 `assertInstanceScene` 把 template 目标
+ * 一并拒绝，导致「AI 创建问卷」整条链路不可用 —— 那是把
+ * 「模板草稿」与「已发布版本」混为一谈了。
+ */
+export function assertWritableScene(context: ToolContext): void {
+  const allowed =
+    (context.scene === "create_template" &&
+      context.targetType === "template") ||
+    (context.scene === "modify_questionnaire" &&
+      context.targetType === "questionnaire_instance");
+
+  if (!allowed) {
     throw invalidParameter(
-      `当前会话目标类型为 ${context.targetType}，该工具只适用于问卷实例`
+      `场景与目标类型不匹配：scene=${context.scene}, targetType=${context.targetType}。` +
+        `create_template 需要 targetType=template（模板草稿）；` +
+        `modify_questionnaire 需要 targetType=questionnaire_instance。` +
+        `已发布的正式模板不允许被 AI 修改。`
     );
   }
 }

@@ -55,6 +55,8 @@ import {
 
 /** 能修改问卷结构的角色（决策 D8） */
 export const STRUCTURE_WRITE_ROLES = ["dispatcher", "template_admin"] as const;
+/** 模板管理角色（模板库属于 template_admin 职责范围） */
+export const TEMPLATE_ADMIN_ROLES = ["template_admin"] as const;
 /** 只读角色 */
 export const STRUCTURE_READ_ROLES = [
   "investigator",
@@ -260,6 +262,40 @@ export const questionnaireService = {
       );
     }
     return instance;
+  },
+
+  /**
+   * 读取「模板草稿版本」的问卷结构。
+   *
+   * 为什么需要这个入口：
+   *   AI 创建问卷的目标是 **Template Draft**（决策 D2 / 03 文档第 36.0 节），
+   *   它不是问卷实例，因此不能走 getInstance。
+   *   早期实现缺这个入口，导致 get_questionnaire 拿模板版本 id
+   *   去查实例表，永远返回 QUESTIONNAIRE_NOT_FOUND，
+   *   使「AI 创建问卷」整条链路不可用。
+   *
+   * 权限：需要模板管理角色（模板库属于 template_admin 的职责范围）。
+   */
+  async getTemplateVersionForEditing(
+    versionId: string,
+    ctx: ServiceContext
+  ): Promise<TemplateVersionRecord> {
+    if (!ctx.roles.some((r) => TEMPLATE_ADMIN_ROLES.includes(r as never))) {
+      throw permissionDenied(
+        `当前用户角色 [${ctx.roles.join(", ")}] 无权访问模板草稿，需要 template_admin`
+      );
+    }
+
+    const version = await questionnaireRepository.findTemplateVersionById(
+      versionId
+    );
+    if (!version) {
+      throw new OperationError(
+        ErrorCode.TEMPLATE_VERSION_NOT_FOUND,
+        `模板版本不存在：${versionId}`
+      );
+    }
+    return version;
   },
 
   // ----------------------------------------------------------

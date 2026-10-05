@@ -289,6 +289,93 @@ export const templateService = {
     });
   },
 
+  /**
+   * 落定一个 AI 对话产出的草稿版本（05 文档第 33 节 commit）。
+   *
+   * 与 publishVersion 的区别：
+   *   commit 只把草稿"定稿"（校验结构非空、写入名称/说明），**不发布**；
+   *   发布仍须由 template_admin 显式调用 publishVersion。
+   *
+   * 为什么要校验「非空」：
+   *   AI 对话可能一次都没成功写入（例如模型没调用任何工具），
+   *   此时若允许 commit，模板库里会多出一个空模板。
+   */
+  async commitDraftVersion(
+    versionId: string,
+    input: { name?: string; description?: string; changeNote?: string },
+    ctx: ServiceContext
+  ): Promise<{
+    templateId: string;
+    templateVersionId: string;
+    versionNo: number;
+    status: string;
+  }> {
+    assertTemplateAdmin(ctx);
+
+    return transaction(async (tx: Tx) => {
+      const version = await tx.questionnaireTemplateVersion.findUnique({
+        where: { id: versionId },
+      });
+      if (!version) {
+        throw new OperationError(
+          ErrorCode.TEMPLATE_VERSION_NOT_FOUND,
+          `模板版本不存在：${versionId}`
+        );
+      }
+      if (version.status !== "draft") {
+        throw new OperationError(
+          ErrorCode.PERMISSION_DENIED,
+          `模板版本状态为 ${version.status}，只有 draft 版本可以提交`
+        );
+      }
+
+      const parsed = questionnaireSchema.parse(version.schema);
+      const questionCount = parsed.sections.reduce(
+        (n, s) => n + s.questions.length,
+        0
+      );
+
+      if (parsed.sections.length === 0 || questionCount === 0) {
+        throw new OperationError(
+          ErrorCode.VALIDATION_ERROR,
+          "问卷还是空的，至少要有 1 个分组和 1 个问题才能保存为模板版本",
+          {
+            path: "schema",
+            sections: parsed.sections.length,
+            questions: questionCount,
+          }
+        );
+      }
+
+      // 名称/说明落在模板上（同一模板的多个版本共享名称）
+      if (input.name !== undefined || input.description !== undefined) {
+        await tx.questionnaireTemplate.update({
+          where: { id: version.templateId },
+          data: {
+            ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+            ...(input.description !== undefined
+              ? { description: input.description }
+              : {}),
+          },
+        });
+      }
+
+      const updated = await tx.questionnaireTemplateVersion.update({
+        where: { id: versionId },
+        data: {
+          changeNote: input.changeNote ?? version.changeNote ?? "AI 生成初版",
+        },
+      });
+
+      return {
+        templateId: updated.templateId,
+        templateVersionId: updated.id,
+        versionNo: updated.versionNo,
+        status: updated.status,
+      };
+    });
+  },
+
   async disableVersion(
     templateId: string,
     versionId: string,
