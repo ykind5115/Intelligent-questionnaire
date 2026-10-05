@@ -53,12 +53,13 @@ AI 按本次案件的特殊需求修改【实例】
 | 7 个 AI Tool + Tool Registry（含 JSON Schema 生成） | ✅ 完成 |
 | LLM Provider 抽象 + DeepSeek 实现（决策 D12） | ✅ 完成 |
 | AI Orchestrator（上下文 + Tool 循环 + 轮数上限 + 幂等） | ✅ 完成 |
-| 测试：44 单元 + 66 集成，共 110 例全绿 | ✅ 完成 |
-| REST API 路由层（除 /healthz 与 /api/v1/me 外） | ⬜ 下一步 |
-| AI 会话落库（ai_conversations / ai_messages 读写） | ⬜ |
-| SSE 流式输出 | ⬜ |
-| 下发 / 填写 / 审核闭环 | ⬜ |
+| AI 会话落库（ai_conversations / ai_messages 读写与历史回放） | ✅ 完成 |
+| REST API：模板 / 实例 / AI 会话 / 下发 / 填写 / 审核 | ✅ 完成 |
+| 统一响应结构、错误码 → HTTP 状态码映射 | ✅ 完成 |
+| 测试：44 单元 + 146 集成，共 190 例全绿 | ✅ 完成 |
+| AI 评测用例集（决策 D5：量化「AI 生成/修改成功率」） | ⬜ 下一步 |
 | 前端简要实现（结构树 + 对话 + 确认/下发） | ⬜ |
+| 真实模型端到端验证（需 `AI_API_KEY`） | ⬜ |
 | 人工编辑器（上线前兜底，决策 D3） | ⬜ 最后 |
 
 ---
@@ -242,7 +243,10 @@ curl http://127.0.0.1:3000/api/v1/me \
 ├── tests/
 │   ├── fixtures/            测试夹具
 │   ├── unit/                44 个单元测试（Operation 层，无数据库）
-│   └── integration/         66 个集成测试（真实数据库）
+│   └── integration/         146 个集成测试（真实数据库）
+│       ├── questionnaire/   Service：冻结、幂等、乐观锁、撤回
+│       ├── ai/              Tool、Orchestrator（假 Provider）、Provider 线格式
+│       └── api/             HTTP 端点：模板/实例/AI/下发/填写/审核
 │       ├── questionnaire/   Service：冻结、幂等、乐观锁、撤回
 │       └── ai/              Tool 与 Orchestrator（假 Provider 驱动）
 │

@@ -411,8 +411,78 @@ allowBuilds:
   esbuild: true      # tsx / vitest 依赖它，极易漏掉
 ```
 
-## 3C2.5 已实测通过的最小链路
+## 3C2.5 连接池必须显式压低上限（实测，极易误判为「偶发」）
 
+这是本项目踩过的最隐蔽的一个坑，**表现为看起来随机的失败**。
+
+### 现象
+
+并发请求或并行跑集成测试时，会随机关联报出三类错误：
+
+```text
+Server has closed the connection
+Connection terminated unexpectedly
+DriverAdapterError: bind message supplies 3 parameters,
+                    but prepared statement "" requires 0
+```
+
+特征：
+
+```text
+1. 单独跑某一个测试文件时全绿，多个文件并行就随机失败；
+2. 每次失败的用例集合都不一样；
+3. 第三条错误最迷惑人 —— 它是连接异常中断后
+   pg 复用了失效的 prepared statement 状态所产生的次生现象，
+   不是「SQL 参数写错了」。
+```
+
+### 根因
+
+```text
+prisma dev 给出的连接串自带 connection_limit=10，
+而 pg.Pool 的默认 max 也是 10 ——
+两边上限顶在一起，并发一高服务端就主动断开连接。
+```
+
+### 解决
+
+在 `src/database/client.ts` 里显式配置连接池，
+让客户端上限**明显低于**服务端限制：
+
+```ts
+const adapter = new PrismaPg(
+  {
+    connectionString: env.DATABASE_URL,
+    max: Number(process.env["DB_POOL_MAX"] ?? 5),
+    idleTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 15_000,
+  },
+  {
+    onPoolError: (err) => console.error("[db pool error]", err.message),
+    onConnectionError: (err) => console.error("[db connection error]", err.message),
+  }
+);
+```
+
+实测结果：
+
+```text
+修复前：并发 20 就开始出现连接中断
+修复后：并发 60 全部成功
+```
+
+### 迁移到内网时要做什么
+
+```text
+max 仍应保持「小于数据库 max_connections ÷ 应用实例数」。
+真实 PostgreSQL 的 max_connections 通常远大于 10，
+因此届时应按实际容量重新评估该值，而不是照搬 5。
+```
+
+> **注意**：不要因为「单独跑能过」就把这类错误当成偶发而忽略。
+> 它会在生产环境的高并发下稳定复现。
+
+## 3C2.6 已实测通过的最小链路
 ```text
 pnpm install
     ↓
@@ -429,7 +499,7 @@ pnpm db:seed                        → 测试数据写入
 pnpm dev                            → /healthz 返回 db: up
 ```
 
-## 3C2.6 两个会浪费大量时间的坑（已实测）
+## 3C2.7 两个会浪费大量时间的坑（已实测）
 
 ### 坑一：本地 Prisma Postgres 忽略连接串里的数据库名
 
@@ -3196,19 +3266,19 @@ SSE 流式输出
 05. 实现 Questionnaire Operation              ✅（6 个纯函数 + 单元测试 44 例）
 06. 实现 Questionnaire Repository             ✅（乐观锁 / Revision / 审计 / 幂等查询）
 07. 实现 Questionnaire Service                ✅（权限 D8 + 状态校验 D1 + 事务 + 幂等 D9）
-08. 实现基础 REST API                         ⬜ 待做（目前只有 /healthz 与 /api/v1/me）
-09. 实现 LLM Provider                         ⬜
-10. 实现 AI Conversation                      ⬜
-11. 实现 Tool Registry                        ⬜
-12. 实现第一个 Tool                           ⬜
-13. 完成 AI → Tool → DB                       ⬜
-14. 实现全部 V1 Tool                          ⬜
-15. 实现 AI 创建问卷                          ⬜
-16. 实现 Template → Instance                  ⬜（seed 中已手工演示该结构）
-17. 实现 AI 修改 Instance                     ⬜
-18. 接入下发 / 填写 / 审核                    ⬜
-19. 撤回                                      ✅（Service 已实现并测试）
-20. 扶正为模板版本                            ⬜（Service 待补 promote）
+08. 实现基础 REST API                         ✅（模板/实例/AI 会话/下发/填写/审核 + 统一错误处理）
+09. 实现 LLM Provider                         ✅（抽象 + DeepSeek，19 例线格式测试）
+10. 实现 AI Conversation                      ✅（落库 + 历史回放 + 驱动 Orchestrator）
+11. 实现 Tool Registry                        ✅（含 Zod → JSON Schema 生成）
+12. 实现第一个 Tool                           ✅
+13. 完成 AI → Tool → DB                       ✅（假 Provider 驱动真实 Tool→Service→DB）
+14. 实现全部 V1 Tool                          ✅（7 个，无宏工具）
+15. 实现 AI 创建问卷                          🟡 链路已通；需接真实模型端到端验证
+16. 实现 Template → Instance                  ✅（克隆 schema + 写 Revision 1）
+17. 实现 AI 修改 Instance                     🟡 链路已通；需接真实模型端到端验证
+18. 接入下发 / 填写 / 审核                    ✅
+19. 撤回                                      ✅（Service + API 均已实现并测试）
+20. 扶正为模板版本                            ✅（promoteToTemplate + API + 测试）
 21. 固定用例集 + seed 测试数据                🟡 seed 已完成；AI 评测用例集待做
 22. 人工编辑器（上线前兜底，决策 D3）         ⬜
 ```
@@ -3217,5 +3287,14 @@ SSE 流式输出
 
 ```text
 pnpm typecheck   → 通过
-pnpm test        → 68 个测试通过（44 单元 + 24 集成，真实数据库）
+pnpm test        → 190 个测试通过（44 单元 + 146 集成，真实数据库）
+                   连续两遍全绿
+```
+
+**尚未验证的部分：**
+
+```text
+真实模型端到端对话未验证（需要有效的 AI_API_KEY）。
+链路每一段都已独立验证，但「真实 DeepSeek 返回的 tool_calls
+能被正确解析并驱动业务」只有接上真 Key 才能最终确认。
 ```
