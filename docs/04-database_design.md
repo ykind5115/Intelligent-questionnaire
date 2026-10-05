@@ -55,16 +55,26 @@ TypeScript
 
 建议后端采用 Node.js 运行环境。
 
-数据库访问层可以后续选择：
+数据库访问层**已定版为 Prisma**（决策 D4，见 `09-review-and-decisions.md`）：
 
 ```text
-Prisma
-Drizzle
-TypeORM
-原生 pg
+Prisma 7.10.0 + @prisma/client 7.10.0
 ```
 
-本数据库设计不强绑定具体 ORM。
+本文档早期版本写的是「可以后续选择 Prisma / Drizzle / TypeORM / 原生 pg，
+本数据库设计不强绑定具体 ORM」。
+
+**该表述已作废**：
+
+```text
+1. D4 已定版 Express + Prisma，不再保留 ORM 候选；
+2. 本文档的 JSONB 字段、乐观锁 UPDATE ... WHERE current_revision = $3、
+   多表循环外键的 ALTER TABLE 顺序，都按 Prisma Schema + Migration 描述；
+3. 版本锁定为 7.10.0（D10），因为 npm latest 当前指向 8.0 RC。
+```
+
+Prisma 相关的实操注意（版本锁定、pnpm 构建脚本、本地数据库）见
+`06-proj_init.md` 第 3A 至 3E 节。
 
 ---
 
@@ -282,6 +292,8 @@ CREATE TABLE users (
     password_hash TEXT,
     status VARCHAR(20) NOT NULL DEFAULT 'active',
 
+    roles VARCHAR(30)[] NOT NULL DEFAULT '{}',
+
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -298,19 +310,47 @@ CREATE TABLE users (
 | display_name  | VARCHAR     | 显示名称  |
 | password_hash | TEXT        | 密码哈希  |
 | status        | VARCHAR     | 用户状态  |
+| roles         | VARCHAR[]   | 角色数组  |
 | created_at    | TIMESTAMPTZ | 创建时间  |
 | updated_at    | TIMESTAMPTZ | 更新时间  |
 
-V1 的角色权限可以暂时简化。
+## 8.4 角色模型（决策 D8）
 
-如果后续需要完整 RBAC，再独立增加：
+V1 采用最简方案：**在 `users` 表上直接放一个 `roles` 数组字段**，
+不建独立的 RBAC 表。
+
+四类角色：
 
 ```text
-roles
-permissions
-user_roles
-role_permissions
+template_admin      模板管理
+dispatcher          问卷创建 / 下发 / 撤回
+investigator        问卷填写
+reviewer            问卷审核
 ```
+
+设计说明：
+
+```text
+1. 使用数组而非单值，允许一人多角色
+   （例如管理员同时是审核人）。
+
+2. 默认值 '{}' 表示无任何角色，只能登录不能操作，
+   避免新用户默认获得权限。
+
+3. 不用 ENUM 类型而用 VARCHAR(30)[]：
+   新增角色时不需要 ALTER TYPE，迁移成本更低。
+
+4. 需要按角色查询用户时，可加 GIN 索引：
+   CREATE INDEX idx_users_roles ON users USING GIN (roles);
+```
+
+本文档早期版本写的是「V1 的角色权限可以暂时简化，
+如果后续需要完整 RBAC，再独立增加 roles / permissions / user_roles /
+role_permissions」。
+
+**该表述已作废**：V1 直接使用 `users.roles` 字段。
+未来需要细粒度权限时，`roles` 可平滑迁移为 `user_roles` 关联表，
+不影响调用方（因为调用方看到的一直是「用户拥有哪些角色」）。
 
 ---
 
@@ -387,6 +427,13 @@ CREATE TABLE questionnaire_template_versions (
 
     status VARCHAR(20) NOT NULL DEFAULT 'draft',
 
+    source_type VARCHAR(30) NOT NULL DEFAULT 'manual',
+    -- 'manual' | 'ai_generated' | 'promoted_from_instance'
+
+    source_instance_id UUID,
+    -- 当 source_type = 'promoted_from_instance' 时，
+    -- 记录该版本来自哪个问卷实例（决策 D2）
+
     created_by UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -398,9 +445,60 @@ CREATE TABLE questionnaire_template_versions (
         FOREIGN KEY (created_by)
         REFERENCES users(id),
 
+    CONSTRAINT fk_template_version_source_instance
+        FOREIGN KEY (source_instance_id)
+        REFERENCES questionnaire_instances(id),
+
     CONSTRAINT uq_template_version
         UNIQUE (template_id, version_no)
 );
+```
+
+## 10.3 版本来源（决策 D2）
+
+三个字段共同回答「这个版本是怎么来的」：
+
+```text
+source_type = 'ai_generated'
+    → 由 AI 对话生成，经 POST /ai/conversations/{id}/commit 落库
+
+source_type = 'promoted_from_instance'
+    → 由某个问卷实例扶正而来，见 POST /questionnaire-instances/{id}/promote
+    → source_instance_id 指向来源实例
+
+source_type = 'manual'
+    → 人工创建或人工编辑器保存
+```
+
+**注意外键方向**：`questionnaire_template_versions.source_instance_id`
+指向 `questionnaire_instances`，而 `questionnaire_instances.template_version_id`
+又指向本表。
+
+```text
+questionnaire_template_versions ──┐
+        │                         │ source_instance_id
+        │ template_version_id     │
+        ↓                         │
+questionnaire_instances ──────────┘
+```
+
+这是一个**循环引用**，因此：
+
+```text
+1. source_instance_id 必须可空（NULL 表示非扶正来源）；
+2. 两张表的建表语句不能同时带这个 FK，
+   必须先建表，再 ALTER TABLE 添加约束；
+3. 实例被删除（V1 不物理删除）时该 FK 不会触发问题。
+```
+
+Migration 顺序因此需要调整为：
+
+```text
+1. 建 questionnaire_template_versions（不含 source_instance_id 的 FK）
+2. 建 questionnaire_instances
+3. ALTER TABLE questionnaire_template_versions
+     ADD CONSTRAINT fk_template_version_source_instance
+     FOREIGN KEY (source_instance_id) REFERENCES questionnaire_instances(id)
 ```
 
 ---
@@ -668,10 +766,70 @@ CREATE TABLE questionnaire_revisions (
         FOREIGN KEY (questionnaire_instance_id)
         REFERENCES questionnaire_instances(id),
 
+    CONSTRAINT fk_revision_creator
+        FOREIGN KEY (created_by)
+        REFERENCES users(id),
+
     CONSTRAINT uq_instance_revision
         UNIQUE (questionnaire_instance_id, revision_no)
 );
 ```
+
+## 16.3 Revision 的粒度（决策 D9）
+
+> **一次 Tool 调用 = 一个 operation_id = 一次 Revision 递增。**
+
+```text
+一条用户消息
+  → 可能触发多次增量 Tool 调用
+  → 因此一次对话可能产生多个 Revision
+```
+
+例如「增加团伙调查模块，里面要调查有没有团伙以及团伙成员」：
+
+```text
+Revision 1（实例创建时的克隆快照）
+   ↓ add_section      → Revision 2
+   ↓ add_question     → Revision 3
+   ↓ add_question     → Revision 4
+```
+
+这是**设计目标**而非缺陷：
+
+```text
+1. 每次 Tool 调用的效果都可独立还原；
+2. D2 扶正时需要「这次改了什么」的精确 diff；
+3. operation_id 与 revision 一一对应，重试时不会重复产生一批 Revision。
+```
+
+## 16.4 `operation_id` 是否需要唯一约束
+
+**不加 UNIQUE 约束。**
+
+原设计考虑过给 `operation_id` 加唯一性以保证幂等，
+但幂等的判定依据是 `ai_tool_executions` 表（见第 24 节），
+不需要在 `questionnaire_revisions` 上重复约束：
+
+```text
+1. 幂等判断在 ai_tool_executions 层完成（先查后插）；
+2. 若此处也加 UNIQUE，两处约束语义重叠，
+   未来某一处变更容易造成不一致；
+3. revision 表是历史记录，应当只追加，不做唯一性拦截。
+```
+
+## 16.5 `created_by` 的补充说明
+
+本文档早期版本的 `created_by` 无外键。
+**现已补充 `fk_revision_creator`**，理由：
+
+```text
+审计需求要求能回答「这个问题是谁什么时候加进去的」
+（见本文档第 341 节与第 35 节），
+没有外键就无法可靠关联到用户。
+```
+
+该字段可空的原因：系统自动产生的 Revision（如实例初始化时的
+Revision 1）可能没有明确的操作用户。
 
 ---
 
@@ -956,6 +1114,69 @@ O001
 
 而不是再次修改问卷。
 
+## 24.1 幂等粒度（决策 D9）
+
+> **一次 Tool 调用 = 一个 `operation_id`。**
+
+```text
+一条用户消息
+  └── LLM 回合
+        ├── Tool Call #1 → op_001
+        ├── Tool Call #2 → op_002
+        └── Tool Call #3 → op_003
+```
+
+这与 `03-questionnaire_schema_ai_tool_calling .md` 第 32 节、
+`08-ai_agent_prompt_tool_calling.md` 第 25.2 节一致。
+
+## 24.2 实现方式：先查后插，不要依赖 UNIQUE 报错
+
+`ai_tool_executions.operation_id` 上有 `UNIQUE` 约束（见第 23 节 DDL）。
+
+**但幂等判断不能实现为「INSERT 失败即视为重复」**：
+
+```text
+那样做的话，第二次重试会在数据库层抛出唯一约束冲突，
+而不是干净地返回第一次的执行结果——
+模型收到的是一个数据库异常，而不是「你刚才已经做过了」。
+```
+
+**正确实现：**
+
+```text
+BEGIN
+
+  SELECT * FROM ai_tool_executions
+   WHERE operation_id = $1
+
+  查到且 success = true
+    → 直接返回已记录的 result，不修改问卷，COMMIT
+
+  查到且 success = false
+    → 说明上次执行失败；允许重试，或返回同一失败结果
+
+  查不到
+    → 执行 Tool
+    → INSERT ai_tool_executions
+    → 下一次 Tool 调用使用新的 operation_id
+    → COMMIT
+
+END
+```
+
+## 24.3 为什么表结构上仍保留 UNIQUE
+
+```text
+1. 它是数据库层的最后一道防线：即使应用层有 bug，
+   也不会写出两条相同 operation_id 的记录；
+2. 它让「一次 Tool 调用 = 一条执行记录」这个不变量
+   由数据库而非仅由代码保证；
+3. 应用层的先查后插负责给出友好的返回结果，
+   数据库约束负责兜底。
+```
+
+两者的分工与第 44 节「JSONB 数据校验」的双重校验思路一致。
+
 ---
 
 # 25. dispatch_tasks
@@ -984,6 +1205,9 @@ CREATE TABLE dispatch_tasks (
 
     due_at TIMESTAMPTZ,
 
+    withdrawn_at TIMESTAMPTZ,
+    withdrawn_by UUID,
+
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -997,9 +1221,35 @@ CREATE TABLE dispatch_tasks (
 
     CONSTRAINT fk_dispatch_creator
         FOREIGN KEY (dispatched_by)
+        REFERENCES users(id),
+
+    CONSTRAINT fk_dispatch_withdrawer
+        FOREIGN KEY (withdrawn_by)
         REFERENCES users(id)
 );
 ```
+
+## 25.3 撤回支持（决策 D1）
+
+因为「下发后结构冻结」，必须提供撤回路径（见 `05-api_design.md`
+第 13A 节），`dispatch_tasks` 需要记录撤回信息：
+
+```text
+status       'pending' | 'dispatched' | 'withdrawn' | 'completed'
+withdrawn_at 撤回时间
+withdrawn_by 撤回操作人（dispatcher 角色）
+```
+
+撤回时同一事务内还需要：
+
+```text
+1. questionnaire_instances.status  → 'draft'
+2. questionnaire_responses.status  → 'withdrawn'
+3. 本表 status                     → 'withdrawn'
+```
+
+**注意：** 不物理删除任何记录，撤回只是状态变更。
+理由见第 45 节的删除策略。
 
 ---
 
@@ -1064,6 +1314,9 @@ CREATE TABLE questionnaire_answers (
 
     question_id VARCHAR(100) NOT NULL,
 
+    revision_no INTEGER NOT NULL,
+    -- 记录该答案是在哪个实例修订版本下填写的（见第 29 节说明）
+
     answer JSONB,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1076,6 +1329,39 @@ CREATE TABLE questionnaire_answers (
     CONSTRAINT uq_response_question
         UNIQUE (response_id, question_id)
 );
+```
+
+## 27.3 为什么答案要记录 `revision_no`
+
+本文档第 29 节说明：`question_id` 无法建立外键，
+答案与题目之间只能靠「当时的 Questionnaire Schema」进行逻辑关联。
+
+因此必须记录填写时的版本：
+
+```text
+questionnaire_answers.revision_no
+        ↓
+对应 questionnaire_revisions.revision_no
+        ↓
+拿到当时的 schema_snapshot
+        ↓
+还原「这道题当时长什么样、有哪些选项」
+```
+
+**这一字段是 D1（下发后冻结）能够安全成立的前提之一：**
+
+```text
+若未来允许撤回后修改结构，已填写的旧答案不会因为
+题目被改名或选项被调整而变得无法解释——
+因为它绑定的是当时的 revision。
+```
+
+另外 `questionnaire_responses.status` 需要支持以下取值：
+
+```text
+draft       填写中
+submitted   已提交
+withdrawn   因实例被撤回而失效（决策 D1）
 ```
 
 ---
@@ -2102,30 +2388,75 @@ V2/V3
 建议数据库 Migration 按依赖关系建立。
 
 ```text
-1. users
+1.  users
 
-2. questionnaire_templates
+2.  questionnaire_templates
+2b. questionnaire_templates.current_version_id 的 FK
+      （依赖第 3 步，见下方说明）
 
-3. questionnaire_template_versions
+3.  questionnaire_template_versions
+      （不含 source_instance_id 的 FK）
 
-4. questionnaire_instances
+4.  questionnaire_instances
 
-5. questionnaire_revisions
+5.  ALTER TABLE questionnaire_template_versions
+      ADD CONSTRAINT fk_template_version_source_instance
+      （依赖第 4 步，决策 D2）
 
-6. ai_conversations
+6.  questionnaire_revisions
 
-7. ai_messages
+7.  ai_conversations
 
-8. ai_tool_executions
+8.  ai_messages
 
-9. dispatch_tasks
+9.  ai_tool_executions
 
-10. questionnaire_responses
+10. dispatch_tasks
 
-11. questionnaire_answers
+11. questionnaire_responses
 
-12. review_records
+12. questionnaire_answers
+
+13. review_records
 ```
+
+## 51.1 两处循环外键必须拆成 ALTER TABLE
+
+本文档存在两处表间循环引用，**建表语句不能直接互相引用**：
+
+```text
+循环一：
+  questionnaire_templates.current_version_id → questionnaire_template_versions.id
+  questionnaire_template_versions.template_id → questionnaire_templates.id
+
+循环二：
+  questionnaire_template_versions.source_instance_id → questionnaire_instances.id
+  questionnaire_instances.template_version_id → questionnaire_template_versions.id
+```
+
+处理方式统一为：
+
+```text
+1. 先建两张表，其中一侧的可空字段不带 FK；
+2. 再 ALTER TABLE 补上 FK 约束。
+```
+
+这一点必须在 Migration 里明确写出来，
+否则 Prisma 生成迁移时会出现无法解析的依赖顺序。
+
+## 51.2 本版新增/变更的字段汇总
+
+由已确认决策引入的结构变更：
+
+| 表 | 变更 | 决策 |
+| --- | --- | --- |
+| `users` | 新增 `roles VARCHAR(30)[]` | D8 |
+| `questionnaire_template_versions` | 新增 `source_type`、`source_instance_id` | D2 |
+| `questionnaire_revisions` | `created_by` 补 FK | — |
+| `questionnaire_revisions` | `operation_id` 不加唯一约束 | D9 |
+| `dispatch_tasks` | 新增 `withdrawn_at`、`withdrawn_by` | D1 |
+| `questionnaire_answers` | 新增 `revision_no INTEGER NOT NULL` | — |
+| `questionnaire_responses` | `status` 增加 `withdrawn` 取值 | D1 |
 
 ---
 
@@ -2343,6 +2674,76 @@ Tool Execution 成功才视为 AI 修改成功。
 ```text
 operation_id
 ```
+
+---
+
+### 规则七（D9）
+
+以下四者必须严格一一对应，粒度不可不一致：
+
+```text
+一次 Tool 调用
+  = 一个 operation_id
+  = 一个数据库事务
+  = 一次 current_revision 递增
+  = 一条 questionnaire_revisions 记录
+```
+
+推论：
+
+```text
+一条用户消息可能产生多个 Revision（因为含多次 Tool 调用）。
+这是设计目标，不是异常。
+若未来要合并事务，必须同步调整 operation_id 粒度与 Revision 策略。
+```
+
+---
+
+### 规则八（D1）
+
+已下发的实例不允许任何结构写入：
+
+```text
+questionnaire_instances.status 为 dispatched / in_progress /
+submitted / under_review / returned / completed 时
+        ↓
+禁止写入 current_schema
+禁止产生新的 questionnaire_revisions（撤回操作除外）
+```
+
+撤回本身是一次状态变更事务，它：
+
+```text
+1. 不修改 current_schema
+2. 不产生新的 Revision
+3. 只改 status 与撤回相关字段
+```
+
+---
+
+### 规则九（D9）
+
+幂等判断必须发生在业务写入之前：
+
+```text
+先查 ai_tool_executions.operation_id
+        ↓
+已成功 → 直接返回历史结果，不得再次写入
+        ↓
+不存在 → 执行 → 写入执行记录
+```
+
+不得依赖 `UNIQUE` 约束报错来实现幂等（见第 24.2 节）。
+
+---
+
+### 规则十
+
+`questionnaire_answers.revision_no` 必须指向该答案实际填写时的
+`questionnaire_revisions.revision_no`，且该 Revision 必须已存在。
+
+这条保证了即使未来题目被改名或选项被调整，
+历史答案仍可被正确解释（见第 27.3 节）。
 
 ---
 

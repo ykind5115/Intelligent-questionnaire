@@ -237,6 +237,27 @@ REVIEW_NOT_FOUND
 INVALID_STATUS_TRANSITION
 ```
 
+由已确认决策补充的错误码：
+
+```text
+QUESTIONNAIRE_LOCKED          实例已下发，结构冻结（D1）
+WITHDRAW_NOT_ALLOWED          当前状态不允许撤回（D1）
+PROMOTE_NOT_ALLOWED           当前状态不允许扶正为模板（D2）
+INVALID_TOOL_CONTEXT          Tool 参数 target_id 与 Conversation 不一致（D9 相关）
+NESTED_SECTION_UNSUPPORTED    add_section 传了 parent_section_id（V1 不支持嵌套）
+```
+
+各错误码的 HTTP 状态映射：
+
+| 错误码 | HTTP | 说明 |
+| --- | --- | --- |
+| `QUESTIONNAIRE_LOCKED` | 409 | 状态冲突，不是参数错误 |
+| `WITHDRAW_NOT_ALLOWED` | 409 | 状态冲突 |
+| `PROMOTE_NOT_ALLOWED` | 409 | 状态冲突 |
+| `REVISION_CONFLICT` | 409 | 乐观锁冲突 |
+| `INVALID_TOOL_CONTEXT` | 400 | 参数与上下文不一致 |
+| `NESTED_SECTION_UNSUPPORTED` | 422 | 参数语义合法但 V1 不支持 |
+
 ---
 
 # 9. 模板 API
@@ -849,6 +870,37 @@ Questionnaire Service
 Revision + 1
 ```
 
+## 12.3a 下发后该接口必须拒绝（决策 D1）
+
+发送修改需求前，后端校验实例状态：
+
+```text
+Instance.status == 'draft' 或 'confirmed'
+        → 允许进入 AI 修改流程
+
+Instance.status 为已下发及之后
+        → 立即返回 QUESTIONNAIRE_LOCKED
+          不调用 LLM，不消耗 Token
+```
+
+即：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "QUESTIONNAIRE_LOCKED",
+    "message": "问卷已下发，请先撤回后再修改"
+  }
+}
+```
+
+**该校验在 AI 编排之前执行**，而不是靠 Prompt 约束模型不去改。
+理由：调查员已经拿着冻结的问卷上门核查，
+此时结构变化会让调查结果与问卷对不上。
+
+正确路径是先 `withdraw`（第 13A 节），再进入本流程。
+
 ---
 
 # 12.4 AI 修改后的结果获取
@@ -884,7 +936,11 @@ draft
 confirmed
 ```
 
-确认后默认不允许继续普通结构修改。
+确认（confirm）表示本次问卷结构定稿。
+
+**注意：** 本节早期版本写的是「确认后默认不允许继续普通结构修改」，
+**该表述已修正**——`confirmed` 状态下仍然允许修改（reopen 语义），
+真正的冻结点是下发（dispatch），见下方 13.1 节。
 
 如实际业务需要重新调整，应设计明确的：
 
@@ -895,6 +951,273 @@ reopen
 操作。
 
 V1 暂可不实现。
+
+## 13.1 冻结发生在「下发」，不发生在「确认」（决策 D1）
+
+澄清一个容易混淆的点：
+
+```text
+confirm   → status = confirmed
+            这只是「本次问卷结构定稿」，
+            实例尚未下发给调查员，
+            因此仍然允许修改（即上面的 reopen 语义）。
+
+dispatch  → status = dispatched
+            这才是真正的冻结点：
+            调查员已拿着这份问卷去核查了。
+```
+
+> **问卷一旦下发，结构冻结。**
+>
+> 调查员负责上门核查，具体核查哪些内容由下发人员决定；
+> 「下发」这个动作代表核查内容已经布置清楚。
+
+已下发之后，所有修改类 Tool 与修改类接口一律拒绝：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "QUESTIONNAIRE_LOCKED",
+    "message": "问卷已下发，请先撤回后再修改"
+  }
+}
+```
+
+## 13.2 已确认状态与已下发状态的区分
+
+| 状态 | 能否改结构 | 说明 |
+| --- | --- | --- |
+| `draft` | ✅ | AI 修改的主要场景 |
+| `confirmed` | ✅ | 尚未下发，可改（reopen 语义） |
+| `dispatched` 及之后 | ❌ | 必须撤回（见第 13A 节） |
+
+## 13.3 需要改动时的正确路径
+
+```text
+已下发
+   │
+   │  POST /questionnaire-instances/{id}/withdraw
+   ↓
+ draft          ← 重新允许结构修改
+   │
+   │  修改（AI 或人工）
+   ↓
+confirmed
+   │
+   │  二次下发
+   ↓
+dispatched
+```
+
+**注意：** 本节早期版本提到 `reopen` 操作并说「V1 暂可不实现」。
+**现改为：`confirmed` 状态下允许修改（即 reopen 语义），
+已下发状态必须通过 `withdraw` 撤回**，见第 13A 节。
+
+---
+
+# 13A. 撤回问卷（撤销下发）【V1 必做】
+
+## 13A.1 解决的问题
+
+用户下发后发现核查内容需要调整。
+
+因为下发后结构冻结（D1），必须提供一条正规的撤回路径，
+否则用户只能新建实例，导致同一案件出现两份问卷。
+
+## 13A.2 接口
+
+```http
+POST /api/v1/questionnaire-instances/{instanceId}/withdraw
+```
+
+Request：
+
+```json
+{
+  "reason": "需要增加团伙关系调查"
+}
+```
+
+Response：
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "0199...",
+    "status": "draft",
+    "withdrawnAt": "2026-09-30T10:00:00Z"
+  }
+}
+```
+
+## 13A.3 允许撤回的状态
+
+| 当前状态 | 允许撤回 | 撤回后 |
+| --- | --- | --- |
+| `draft` | ❌ | 本就可改，无需撤回 |
+| `confirmed` | ❌ | 本就可改，无需撤回 |
+| `dispatched` | ✅ | `draft` |
+| `in_progress` | ✅ | `draft` |
+| `submitted` | ✅ | `draft` |
+| `under_review` | ✅ | `draft` |
+| `returned` | ✅（需先回 `in_progress`） | `draft` |
+| `completed` | ❌ | 终态，只能新建实例 |
+
+**关于 `returned` 的说明（与 `02-architecture.md` 第 21.3 节对齐）：**
+
+```text
+returned 表示审核退回，调查员需要重新填写，
+它不是一个独立的可撤回入口。
+
+正确顺序：
+  returned  →  调查员重新开始填写（in_progress）  →  撤回  →  draft
+```
+
+之所以不允许 `returned` 直接撤回：
+
+```text
+returned 状态下，调查员的重新填写工作尚未开始，
+此时撤回会导致「退回」这个动作的业务含义丢失
+（用户分不清是审核退回了，还是下发人员撤回了）。
+```
+
+不满足条件时返回：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "WITHDRAW_NOT_ALLOWED",
+    "message": "已完成的调查任务不能撤回"
+  }
+}
+```
+
+## 13A.4 撤回时必须处理的既有数据
+
+```text
+1. questionnaire_responses
+   → status = 'withdrawn'（不物理删除，保留痕迹）
+
+2. questionnaire_answers
+   → 跟随 response 失效，不回滚、不删除
+
+3. dispatch_tasks
+   → status = 'withdrawn'
+   → 记录 withdrawn_at / withdrawn_by
+
+4. questionnaire_instances
+   → status = 'draft'
+   → current_revision 继续递增，历史 Revision 不清空
+```
+
+## 13A.5 权限
+
+需要 `dispatcher` 角色（决策 D8）。
+
+## 13A.6 数据库支持
+
+`dispatch_tasks` 需要新增：
+
+```sql
+withdrawn_at TIMESTAMPTZ,
+withdrawn_by UUID
+```
+
+`questionnaire_responses.status` 需要支持 `withdrawn` 取值。
+
+---
+
+# 13B. 扶正为模板新版本【决策 D2】
+
+## 13B.1 解决的问题
+
+单个案件的特殊改动，如果反复出现在同类案件中，
+说明标准模板存在缺失，应该沉淀进模板库。
+
+```text
+案件 A：增加「是否存在团伙」   ┐
+案件 B：增加「是否存在团伙」   ├── 同类需求反复出现
+案件 C：增加「活动轨迹」       ┘
+        │
+        ↓
+   应该进入模板，而不是每次手工补
+```
+
+这同时是 `01-rpd.md` 第 21 节所规划的
+「AI 根据历史调查经验推荐问题」的人工版本。
+
+## 13B.2 接口
+
+```http
+POST /api/v1/questionnaire-instances/{instanceId}/promote
+```
+
+Request：
+
+```json
+{
+  "changeNote": "由案件实例扶正：增加团伙关系调查"
+}
+```
+
+Response：
+
+```json
+{
+  "success": true,
+  "data": {
+    "templateId": "0199...",
+    "templateVersionId": "0199...",
+    "versionNo": 3,
+    "status": "draft"
+  }
+}
+```
+
+## 13B.3 后端执行
+
+```text
+1. 读取 Instance
+2. 校验状态（draft / confirmed 才允许扶正）
+3. 读取 Instance.template_version_id → template_id
+4. 复制 Instance.current_schema
+5. 创建 questionnaire_template_version
+   status = draft
+   version_no = max(version_no) + 1
+   source_instance_id = instanceId
+   source_type = 'promoted_from_instance'
+6. 返回新版本（不修改 template.current_version_id）
+```
+
+## 13B.4 关键约束
+
+> **扶正生成的是模板「草稿版本」，不是直接发布。**
+>
+> 正式模板的发布仍然必须经过模板版本治理流程
+> （`POST /questionnaire-templates/{id}/versions/{versionId}/publish`）。
+
+若不满足条件：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "PROMOTE_NOT_ALLOWED",
+    "message": "已下发或已完成的问卷实例不能直接扶正为模板"
+  }
+}
+```
+
+## 13B.5 权限
+
+需要 `template_admin` 角色（决策 D8），
+因为该操作会向模板库写入内容。
+
+推荐由 `dispatcher` 发起、`template_admin` 确认；
+若同一人兼有两个角色，可一次完成。
 
 ---
 
@@ -1617,31 +1940,60 @@ Draft Template
 
 不断变化。
 
-用户确认之后：
+## 33.1 唯一的保存路径：Conversation Commit
+
+本文档早期版本给出了两条并存的路径：
 
 ```http
-POST /api/v1/questionnaire-templates/{templateId}/versions
-```
-
-或者由后端提供：
-
-```http
+POST /api/v1/questionnaire-templates/{templateId}/versions   ← 已废弃
 POST /api/v1/ai/conversations/{conversationId}/commit
 ```
 
-V1 更推荐第二种：
+**两条路并存会造成两套语义**（一条是「创建版本」，一条是「提交会话」），
+V1 **只保留 commit**：
 
 ```text
 AI Conversation
         ↓
-用户点击“保存为模板”
+用户点击"保存为模板"
         ↓
-commit
+POST /ai/conversations/{id}/commit
         ↓
 Template Version
 ```
 
-这样 AI 会话与最终生成结果天然绑定。
+理由：
+
+```text
+1. AI 会话与最终生成结果天然绑定，不需要外部再传一次 schema；
+2. 避免「会话里的草稿」与「客户端传来的 schema」不一致；
+3. 用户心智只有「对话生成 → 保存」一步。
+```
+
+## 33.2 那么 `POST /questionnaire-templates/{id}/versions` 还用吗
+
+**仍然保留，但语义收窄**为「人工/非 AI 场景创建模板版本」，
+主要供以下场景使用（见决策 D2、D3）：
+
+```text
+1. 人工编辑器保存版本（D3，上线前阶段）
+2. 实例扶正后由 template_admin 调整并另存新版本（D2）
+3. 手工新建模板版本（不走 AI 的场景）
+```
+
+**AI 生成模板的链路不得使用该接口。**
+
+## 33.3 两者的分工
+
+```text
+AI 生成        → POST /ai/conversations/{id}/commit
+人工编辑        → POST /questionnaire-templates/{id}/versions
+实例扶正        → POST /questionnaire-instances/{id}/promote
+                    ↓ 之后同样走 questionnaire-templates/.../versions
+```
+
+三条路最终都落到同一张 `questionnaire_template_versions` 表，
+且都产生 `status = draft` 的版本，都必须经过 publish 才生效。
 
 ---
 
@@ -1827,15 +2179,15 @@ Response
 ```text
 POST /ai/conversations
 POST /ai/conversations/{id}/messages
-
-GET /questionnaire-instances/{id}
+POST /ai/conversations/{id}/commit
 
 POST /questionnaire-instances
+GET  /questionnaire-instances/{id}
 
 POST /questionnaire-instances/{id}/confirm
 ```
 
-加上内部：
+加上内部 Tool：
 
 ```text
 get_questionnaire
@@ -1846,6 +2198,23 @@ update_question
 remove_question
 move_question
 ```
+
+## P0.5 —— 由决策 D1 提升为必做
+
+撤回是「下发后冻结」规则的配套能力，**没有它用户会被锁死**，
+因此从原 P1 提升：
+
+```text
+POST /questionnaire-instances/{id}/withdraw     ← D1
+```
+
+扶正（D2）同样提升，否则「临时改动」永远无法沉淀：
+
+```text
+POST /questionnaire-instances/{id}/promote      ← D2
+```
+
+实现顺序上可略晚于 withdraw，但必须在 V1 内完成。
 
 ---
 
@@ -1897,14 +2266,20 @@ AI结果分析
 │   └── :id
 │       ├── GET
 │       ├── versions
+│       │   └── POST                        ← 人工/扶正场景创建版本
 │       └── versions/:versionId
+│           ├── PATCH                       ← 仅 draft 版本
+│           ├── publish
+│           └── disable
 │
 ├── questionnaire-instances
 │   ├── POST
 │   └── :id
 │       ├── GET
 │       ├── revisions
-│       └── confirm
+│       ├── confirm
+│       ├── withdraw                        ← D1【P0.5】
+│       └── promote                         ← D2【P0.5】
 │
 ├── ai
 │   └── conversations
@@ -1912,7 +2287,7 @@ AI结果分析
 │       └── :id
 │           ├── GET
 │           ├── messages
-│           └── commit
+│           └── commit                      ← AI 生成模板的唯一保存入口
 │
 ├── dispatch-tasks
 │   ├── GET
@@ -1924,6 +2299,17 @@ AI结果分析
     │   ├── submit
     │   └── review
 ```
+
+## 40.1 三条「保存版本」路径的分工
+
+```text
+POST /ai/conversations/:id/commit              AI 对话生成 → 模板版本
+POST /questionnaire-templates/:id/versions     人工编辑 → 模板版本
+POST /questionnaire-instances/:id/promote      实例扶正 → 模板版本（草稿）
+```
+
+三者产出的都是 `status = draft` 的 `questionnaire_template_versions`，
+都必须经过 `publish` 才成为正式版本。
 
 ---
 

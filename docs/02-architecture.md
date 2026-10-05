@@ -228,6 +228,43 @@ AI调用了什么工具
      └───────────┘             └──────────────┘
 ```
 
+## 3.1 技术栈定版（决策 D4）
+
+（决策来源：`09-review-and-decisions.md` D4 / D10；工程落地见 `06-proj_init.md`）
+
+```text
+Runtime         Node.js（本机实测 v22.22.1）
+Language        TypeScript（strict: true）
+HTTP            Express
+ORM             Prisma（prisma@7.10.0 与 @prisma/client@7.10.0，决策 D10）
+Database        PostgreSQL（本地由 prisma dev 提供，决策 D7）
+Validation      Zod
+LLM             DeepSeek（OpenAI 兼容协议）
+Streaming       SSE
+Package Manager pnpm
+```
+
+分层图中的“ORM / SQL”“Node.js HTTP framework”等中性表述，现在全部落到上面这一组具体选型上：
+
+```text
+                          ┌──────────────────────┐
+                          │  数据访问层           │
+                          │                      │
+                          │  Repository          │
+                          │  Prisma Client       │  ← 定版：Prisma
+                          │  Transaction         │
+                          └─────────┬────────────┘
+                                    ↓
+                              PostgreSQL
+```
+
+> **修正原文：** 本架构文档早期版本在第 3 节分层图与第 29 节中保留了
+> “Express / Fastify”“Prisma / Drizzle / pg”的备选空间。**该备选空间已取消（决策 D4）**：
+> 技术栈一次性定版为 **Express + Prisma + PostgreSQL + TypeScript + Zod**，
+> 不再评估 Fastify 与 Drizzle。
+>
+> 分层方式、模块边界与依赖方向的设计不受影响，仍是本文档的有效内容。
+
 ---
 
 # 4. 系统逻辑分层
@@ -487,6 +524,35 @@ questionnaireId
 
 ---
 
+### 8.1A 命名收敛：`questionnaire_id` → `target_type` / `target_id`（决策 B1）
+
+（决策来源：`09-review-and-decisions.md` 第 9.2 节 B1；对应实现见 `06-proj_init.md` 第 27 节的 `ToolContext`）
+
+本文档早期使用了 `questionnaireId` / `questionnaire_id` 表示“AI 当前操作的那份问卷”，
+但这个名字有歧义：它可能指 **Template**，也可能指 **Instance**。
+
+统一收敛为两个字段：
+
+```text
+target_type   'template' | 'instance'
+target_id     Template ID 或 Instance ID
+```
+
+本文档内的对应关系：
+
+| 本文档中的旧写法 | 统一后的写法 | 位置 |
+| --- | --- | --- |
+| `conversation.questionnaireId` | `conversation.targetType` + `conversation.targetId` | 8.1 |
+| `ai_tool_executions.questionnaire_id` | `target_type` + `target_id` | 15 |
+| “Instance ID 是重要上下文” | `target_id`，且 `target_type = 'instance'` | 19.2 |
+| `target = Template Draft #001` | `target_type = 'template'`，`target_id = ...` | 20 |
+
+> **修正原文：** 8.1 节的会话字段列表、15 节的 AI 操作日志字段、19.2 与 20 节的“当前操作对象”描述，
+> 其中的 `questionnaireId` / `questionnaire_id` 一律按上表理解为 **`target_type` + `target_id`**。
+>
+> 语义由 `scene` 决定（`create_template` → template，`modify_questionnaire` → instance），
+> 与 `03-questionnaire_schema_ai_tool_calling .md` 第 22.1 节、`06-proj_init.md` 第 27 节的 `ToolContext` 保持一致。
+
 ### 8.2 构建上下文
 
 根据不同场景向模型提供不同上下文。
@@ -660,6 +726,112 @@ question_id = xxx
 然后模型向用户反馈：
 
 > 已增加“是否与其他人员共同飞行”问题。
+
+---
+
+# 9A. Prompt 编排层：宏能力的正确落点
+
+（决策来源：`09-review-and-decisions.md` 关于宏 Tool 废弃的结论；实现细节见 `08-ai_agent_prompt_tool_calling.md` 第 16 ~ 18 节）
+
+## 9A.1 被废弃的设计
+
+`08-ai_agent_prompt_tool_calling.md` 的早期版本曾把下面两个能力设计成“宏 Tool”：
+
+```text
+generate_questionnaire      一次调用传入需求，返回整份问卷
+modify_questionnaire        一次调用传入需求 + 整份问卷，返回修改后的问卷
+```
+
+**该设计已废弃。** 理由见本文档第 10 节，核心三条：
+
+```text
+1. 模型容易遗漏已有内容
+2. 一个小修改会导致整份问卷被重新生成
+3. 无法精确审计“到底改了哪一处”
+```
+
+并且会直接破坏两个已确认决策：
+
+```text
+D2  实例改动扶正为模板（需要精确 diff）  → 宏 Tool 拿不到可对比的 diff
+D9  一次 Tool 调用一个 operation_id      → 宏 Tool 一次改十几处，重试语义崩溃
+```
+
+## 9A.2 宏能力保留在 Prompt 层
+
+“生成整份问卷”“一句话修改问卷”这两个**用户视角的能力必须保留**，但实现方式变了：
+
+```text
+用户视角（宏能力）
+        ↓
+不是宏 Tool
+        ↓
+而是 Prompt 层的编排约定
+        ↓
+Agent 把一次用户请求拆解为多次增量 Tool 调用
+```
+
+```text
+用户：帮我生成一份无人机黑飞核查问卷
+
+Agent 实际执行：
+  add_section("基本信息")
+  add_question(section_id=sec_01, title="姓名", type="text")
+  add_question(section_id=sec_01, title="身份证号", type="text")
+
+  add_section("无人机情况")
+  add_question(section_id=sec_02, title="是否拥有无人机？", type="boolean")
+  add_question(section_id=sec_02, title="无人机型号", type="text")
+  ...
+```
+
+> **拆解工作由 LLM 在 Prompt 约束下完成，而不是由后端封装成一个黑盒 Tool。**
+>
+> 每一次 `add_question` 都是一次独立、可校验、可审计、可幂等的 Tool 调用。
+
+## 9A.3 Agent 实际可调用的工具：7 个增量 Tool
+
+| Tool | 用途 | 类型 |
+| --- | --- | --- |
+| `get_questionnaire` | 获取当前问卷结构 | 读取 |
+| `add_section` | 新增分组 | 写入 |
+| `add_question` | 新增问题 | 写入 |
+| `update_section` | 修改分组 | 写入 |
+| `update_question` | 修改问题 | 写入 |
+| `remove_question` | 删除问题 | 写入 |
+| `move_question` | 移动问题 | 写入 |
+
+> 这 7 个 Tool 是**唯一的写入通道**，与 `03-questionnaire_schema_ai_tool_calling .md` 第 48 节的 V1 Tool 最小集合一致。
+> 宏 Tool（`generate_questionnaire` / `modify_questionnaire`）**不存在于 Tool Registry 中**。
+
+## 9A.4 代价与缓解
+
+代价很明确：**一轮对话内的 Tool 调用次数变多**（一份中等问卷可能需要 10 ~ 30 次调用）。
+
+```text
+缓解手段
+────────────────────────────────────────────────────────
+1. MAX_TOOL_ROUNDS 轮次上限
+   （08 文档第 26 节，V1 取 8）
+   → 单轮对话的 Tool 调用轮次被硬性封顶，避免无限循环
+
+2. 每次调用的输入输出都很小
+   → 单次 Tool 调用只传一个 section / question 的参数，
+     不是把整份问卷当参数传来传去
+
+3. 读取类 Tool 只在需要时调用
+   → get_questionnaire 不必每轮都调；
+     真正的大头是“问卷全文进上下文”，不是 Tool 定义
+
+4. 同一轮内多个 Tool Call 可并发执行
+   → 一轮内的多次调用不是串行等待
+```
+
+因此 9A 的结论是：
+
+> **宏能力通过 Prompt 编排实现，写入通道保持细粒度。**
+>
+> 这样 D2（扶正需要 diff）与 D9（一次调用一个 operation_id）才成立。
 
 ---
 
@@ -980,7 +1152,7 @@ AI Action
 ────────────────────────────
 conversation_id
 user_id
-questionnaire_id
+target_id
 message_id
 
 tool_name:
@@ -999,6 +1171,8 @@ after_snapshot:
 
 created_at
 ```
+
+> **注（决策 B1）：** 上面的 `questionnaire_id` 是早期命名，实际字段为 `target_type` + `target_id`（见 8.1A）。
 
 这样后续可以追踪：
 
@@ -1302,6 +1476,97 @@ RETURNED
 IN_PROGRESS
 ```
 
+> **注（决策 D1 补充）：** 上面的线性流转并不完整。实例在 `dispatched` 之后还可以**撤回**回到 `draft`，
+> 完整状态机见 21.3 节。原文只描述了“一路向前”与“审核退回”两条路径，缺少撤回路径。
+
+## 21.3 撤回（withdraw）状态流转（决策 D1）
+
+（决策来源：`09-review-and-decisions.md` D1 / 第 3 节；业务规则见 `01-rpd.md` 第 13.1 ~ 13.2 节）
+
+**核心规则：实例一旦下发，问卷结构冻结。** 需要改动时只能撤回，撤回后修改并二次下发。
+
+```text
+DRAFT ──► CONFIRMED ──► DISPATCHED ──► IN_PROGRESS ──► SUBMITTED
+                            │               │              │
+                            └───────────────┴──────────────┘
+                                            │
+                                     withdraw（撤回）
+                                            ↓
+                                          DRAFT        ← 结构重新允许修改
+                                            │
+                                       修改结构
+                                            ↓
+                                        CONFIRMED
+                                            │
+                                        二次下发
+                                            ↓
+                                        DISPATCHED
+
+UNDER_REVIEW ── withdraw ──► DRAFT
+UNDER_REVIEW ── reject ────► RETURNED ──► IN_PROGRESS
+COMPLETED                    ← 终态，不可撤回
+```
+
+> 说明：本节采用**直接回到 `draft`** 的方案，不新增独立的 `withdrawn` 持久状态，
+> 因为“是否已撤回”完全可以通过 `dispatch_tasks.status = withdrawn` 与 `questionnaire_responses.status = withdrawn` 表达，
+> 实例本身回到可修改态即可，避免多一个只用于显示的状态。
+
+状态与动作对照：
+
+| 当前状态 | 允许撤回 | 撤回后 | 说明 |
+| --- | --- | --- | --- |
+| `dispatched` | ✅ | `draft` | 尚未开始填写，撤回代价最小 |
+| `in_progress` | ✅ | `draft` | 已填内容标记失效 |
+| `submitted` | ✅ | `draft` | 已提交内容标记失效，不物理删除 |
+| `under_review` | ✅ | `draft` | 本次审核作废，审核记录保留 |
+| `returned` | ❌ | 先回到 `in_progress` | 退回件先由调查人员回到填写态，再撤回 |
+| `completed` | ❌ | —— | 终态，只能新建实例 |
+| `draft` / `confirmed` | ❌ | —— | 本来就允许改结构，不需要撤回 |
+
+## 21.4 撤回时已产生数据的处置（标记失效，不物理删除）
+
+```text
+questionnaire_responses
+    → status = withdrawn
+    → 记录 withdrawn_at / withdrawn_by
+    → 物理保留（已填内容本身可能就是证据材料）
+
+questionnaire_answers
+    → 跟随 response 一起失效
+    → 不回滚、不删除
+
+dispatch_tasks
+    → status = withdrawn
+    → 记录 withdrawn_at / withdrawn_by
+
+questionnaire_revisions
+    → 历史 Revision 不清空
+    → 撤回后的修改继续递增 current_revision（不覆盖、不重置）
+
+questionnaire_instances
+    → status：dispatched / in_progress / submitted / under_review → draft
+    → 结构重新允许修改
+    → 二次下发时复用同一实例（不新建实例），产生新的 dispatch_task
+```
+
+撤回的两条硬约束：
+
+```text
+1. 权限
+   只有下发人员（角色 dispatcher）可以撤回（决策 D8）
+
+2. 后端校验，不依赖 Prompt 约束
+   状态不在 dispatched / in_progress / submitted / under_review 时
+       → 返回 WITHDRAW_NOT_ALLOWED
+   结构修改类 Tool 在非 draft 状态下被调用时
+       → 返回 QUESTIONNAIRE_LOCKED
+```
+
+> **修正原文：** 21.2 节原文只给出 DRAFT → … → COMPLETED 的单向流转和 RETURNED 退回，
+> 既没有撤回路径，也没有说明“下发后结构冻结”。以 21.3 / 21.4 为准。
+>
+> 与 Tool 层的对应：`03-questionnaire_schema_ai_tool_calling .md` 第 23A 节给出了同一套边界。
+
 ---
 
 # 22. AI 操作状态
@@ -1391,6 +1656,38 @@ AI
 ```
 
 所有 AI Tool 最终都必须经过后端业务权限检查。
+
+## 24.1 角色模型（决策 D8）
+
+（决策来源：`09-review-and-decisions.md` D8 / 第 10.1 节；Tool 侧校验顺序见 `03-questionnaire_schema_ai_tool_calling .md` 第 27 节）
+
+V1 **不建独立的 RBAC 表**，只在 `users` 表上增加一个角色数组字段：
+
+```sql
+ALTER TABLE users
+    ADD COLUMN roles VARCHAR(30)[] NOT NULL DEFAULT '{}';
+```
+
+四类角色与本节权限边界的对应关系：
+
+| 角色 | 对应权限边界 | 可做什么 |
+| --- | --- | --- |
+| `template_admin` | 模板管理权限 | 创建 / 修改 / 发布 / 停用模板与模板版本 |
+| `dispatcher` | 问卷创建权限 + 问卷下发权限 | 选择模板创建实例、用 AI 调整实例结构、确认、下发、**撤回**、把实例结构扶正为模板草稿版本 |
+| `investigator` | 问卷填写权限 | 查看待填写问卷、填写、保存、提交；**不可改结构**，只能读 `get_questionnaire` |
+| `reviewer` | 问卷审核权限 | 查看已提交问卷、审核通过、退回 |
+
+设计要点：
+
+```text
+1. roles 是数组 → 允许一人多角色（例如管理员兼审核人）
+2. 结构修改类 Tool 只有 dispatcher / template_admin 可用
+3. 权限检查在 Service 层执行，AI 无法绕过（AI 只是调用者）
+4. 后续需要细粒度权限时，roles 可平滑迁移为 user_roles 关联表，不影响调用方
+```
+
+> **修正原文：** 第 24 节原文只列出了五类“权限”，没有定义角色的承载方式，
+> 也未说明 `users` 表如何存储角色。以本小节为准：V1 的角色载体就是 `users.roles`（决策 D8）。
 
 ---
 
@@ -2103,4 +2400,37 @@ TypeScript 项目初始化与目录设计
 编码
 ```
 
+## 36.1 与实际文档编号的对照（修订）
 
+（修订来源：`09-review-and-decisions.md` 第 11 节修订动作清单）
+
+上面那段顺序来自本架构文档撰写时的设想，与项目实际的文档编号**并不完全一致**，以实际编号为准：
+
+| 实际文档 | 内容 | 对应上面顺序中的位置 |
+| --- | --- | --- |
+| `00-Requirements.md` | 原始需求（不改） | RPD 之前 |
+| `01-rpd.md` | 产品需求 | RPD |
+| `02-architecture.md` | 系统架构（本文档） | 系统架构设计 |
+| `03-questionnaire_schema_ai_tool_calling .md` | Questionnaire Schema + AI Tool Calling | 合并了“Schema 设计”与“Tool Calling 接口设计” |
+| `04-database_design.md` | 数据库设计 | 数据库设计 |
+| `05-api_design.md` | REST API 接口设计 | REST API 接口设计 |
+| `06-proj_init.md` | TypeScript 项目初始化与目录结构 | TypeScript 项目初始化与目录设计 |
+| `08-ai_agent_prompt_tool_calling.md` | AI Agent / Prompt / Tool Calling 详细设计 | AI Prompt / Agent 设计 |
+| `09-review-and-decisions.md` | 评审结论与决策记录（与 `00` ~ `06` 冲突时以其中的决策为准） | 本轮评审产出 |
+
+两处实质差异：
+
+```text
+1. “Schema 设计”与“Tool Calling 接口设计”被合并进 03 一份文档，
+   而上面的顺序把它们排成了前后两步。
+   → 实际按 03 一份文档阅读即可。
+
+2. 07 号文档缺号；AI Prompt / Agent 设计实际是 08，
+   而且写在 06 之后（因为 Agent 设计依赖项目结构）。
+```
+
+实际建议阅读顺序：
+
+```text
+01 → 02 → 03 → 04 → 05 → 06 → 08 → 09
+```

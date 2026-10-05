@@ -166,6 +166,10 @@ interface QuestionnaireSchema {
 
 第一层使用 Section 表示问卷中的逻辑分组。
 
+> **V1 范围限制：本节虽然定义了 `children`，但 V1 不启用 section 嵌套。**
+>
+> 详见第 5A 节。
+
 ```ts
 interface QuestionnaireSection {
   id: string;
@@ -192,6 +196,75 @@ interface QuestionnaireSection {
 ├── 飞行情况
 │
 └── 关联人员
+```
+
+---
+
+# 5A. 树形结构的 V1 范围（重要）
+
+## 5A.1 字段保留，但功能不启用
+
+`QuestionnaireSection.children` 字段**保留在 Schema 中**，但：
+
+> **V1 的所有 Tool 都不支持在嵌套 section 上操作。**
+
+保留字段的原因：未来扩展时不必做破坏性迁移。
+
+## 5A.2 V1 的实际结构
+
+```text
+Questionnaire
+ └── sections[]          ← 只有一层
+      ├── questions[]    ← 问题直接挂在 section 下
+      │    └── options[] ← 选择题的选项
+      └── (children 恒为空或不存在)
+```
+
+## 5A.3 V1 明确不支持的操作
+
+```text
+1. add_section 传 parent_section_id
+   → 返回 INVALID_PARAMETER（参数存在但暂不支持）
+
+2. 删除整个 section
+   → 无 remove_section Tool
+
+3. 移动整个 section
+   → 无 move_section Tool
+
+4. 问题套问题（Question.children）
+   → Schema 中不存在此字段，任何情况下都不允许
+
+5. add_section 增加 section 的 order
+   → 由后端追加到末尾，模型不得指定
+```
+
+## 5A.4 为什么 V1 不做嵌套
+
+```text
+1. 当前业务场景（无人机黑飞核查、宠物饲养规范核查）
+   都是「几个分组 + 组内问题」的两层结构；
+
+2. 嵌套会让 add_question 的定位、order 重算、前端渲染全部复杂化；
+
+3. D6 决定前端只做简要实现，渲染嵌套树会明显拖慢进度；
+
+4. 真有多层需求时，一级分组配合命名规范通常也能表达清楚。
+```
+
+## 5A.5 若未来需要启用嵌套
+
+需要同步补充以下内容，缺一不可：
+
+```text
+Schema    ：children 的实际使用约束、最大深度
+Tool      ：add_section 的 parent_section_id 校验
+            remove_section
+            move_section
+            add_question 支持 question 级嵌套（若需要）
+后端      ：order 在兄弟节点间的重算规则
+前端      ：递归渲染组件
+AI Prompt ：告知模型存在层级结构，以及如何定位嵌套节点
 ```
 
 ---
@@ -555,7 +628,7 @@ V1 工具划分为三类：
 
 ```ts
 get_questionnaire({
-  questionnaire_id: string
+  target_id: string
 })
 ```
 
@@ -576,7 +649,7 @@ get_questionnaire({
 
 ```ts
 get_question({
-  questionnaire_id: string,
+  target_id: string,
   question_id: string
 })
 ```
@@ -631,14 +704,23 @@ move_question
 
 ```ts
 interface AddSectionInput {
-  questionnaire_id: string;
+  target_id: string;
 
   title: string;
 
   description?: string;
 
-  parent_section_id?: string;
+  parent_section_id?: string;   // V1 暂不支持，传了返回 INVALID_PARAMETER
 }
+```
+
+## 16.2a V1 的 section 层级限制
+
+见第 5A 节：
+
+```text
+V1 只支持一级 section。
+parent_section_id 字段保留在接口签名中，但传值会被拒绝。
 ```
 
 ---
@@ -649,7 +731,7 @@ interface AddSectionInput {
 {
   "name": "add_section",
   "arguments": {
-    "questionnaire_id": "q_001",
+    "target_id": "q_001",
     "title": "团伙关系调查"
   }
 }
@@ -659,15 +741,26 @@ interface AddSectionInput {
 
 ## 16.4 Tool Result
 
+统一使用第 28 节的 `data` 包装格式：
+
 ```json
 {
   "success": true,
-  "section": {
-    "id": "sec_003",
+  "data": {
+    "section_id": "sec_003",
     "title": "团伙关系调查"
+  },
+  "metadata": {
+    "operation_id": "0199..."
   }
 }
 ```
+
+**注意：** 必须返回后端生成的真实 `section_id`，
+模型后续的 `add_question` 只能使用这个 ID（见第 42 节）。
+
+本节早期版本返回的是 `{ "section": { "id": ... } }` 结构，
+与第 28 节的统一格式不一致，现已修正为 `data` 包装。
 
 ---
 
@@ -683,7 +776,7 @@ interface AddSectionInput {
 
 ```ts
 interface AddQuestionInput {
-  questionnaire_id: string;
+  target_id: string;
 
   section_id: string;
 
@@ -732,7 +825,7 @@ AI：
 {
   "name": "add_question",
   "arguments": {
-    "questionnaire_id": "q_001",
+    "target_id": "q_001",
     "section_id": "sec_relation",
     "type": "single_choice",
     "title": "是否存在团伙？",
@@ -782,7 +875,7 @@ description
 
 ```ts
 interface UpdateSectionInput {
-  questionnaire_id: string;
+  target_id: string;
 
   section_id: string;
 
@@ -817,7 +910,7 @@ interface UpdateSectionInput {
 
 ```ts
 interface UpdateQuestionInput {
-  questionnaire_id: string;
+  target_id: string;
 
   question_id: string;
 
@@ -845,7 +938,7 @@ interface UpdateQuestionInput {
 
 ```ts
 interface RemoveQuestionInput {
-  questionnaire_id: string;
+  target_id: string;
 
   question_id: string;
 }
@@ -889,7 +982,7 @@ AI调用 remove_question
 
 ```ts
 interface MoveQuestionInput {
-  questionnaire_id: string;
+  target_id: string;
 
   question_id: string;
 
@@ -914,16 +1007,60 @@ order
 所有修改类 Tool 必须带：
 
 ```text
-questionnaire_id
+target_id
 ```
 
 这样后台始终知道：
 
 > 当前修改的是哪一份问卷。
 
+## 22.1 参数命名统一：`target_id`
+
+本文档早期版本使用 `questionnaire_id`，`05-api_design.md` 使用 `questionnaireId`，
+`08-ai_agent_prompt_tool_calling.md` 早期版本又使用 `questionnaireId` 与 `currentQuestionnaire`。
+
+**现统一为 `target_id`。**
+
+理由：
+
+```text
+1. 在 create_template 场景，它指向 Template Draft；
+   在 modify_questionnaire 场景，它指向 Questionnaire Instance。
+   叫 questionnaire_id 会让「questionnaire」既指模板又指实例，产生歧义。
+
+2. target_id 与 ToolContext.targetId 同名，便于后端做一致性比对。
+
+3. 它表达的是「本次操作的目标对象」，而不是「一个叫 questionnaire 的东西」。
+```
+
+因此本文档早期示例中的 `questionnaire_id` 一律读作 `target_id`。
+
+## 22.2 Tool 参数的字段风格
+
+```text
+Tool 参数（发给 LLM 的 JSON Schema）：snake_case
+  → target_id / section_id / question_id / parent_section_id
+
+REST API 的 JSON 字段：camelCase
+  → targetId / sectionId / questionId
+
+TypeScript 内部类型：camelCase
+  → targetId / sectionId / questionId
+```
+
+这样安排的原因：
+
+```text
+Tool 参数直接暴露给模型，snake_case 在模型见过的工具定义中更常见，
+且与本文档既有示例一致；
+REST 层遵循 05-api_design.md 第 37 节的 camelCase 规范。
+```
+
+转换由 Tool 层负责，业务层只看到 camelCase。
+
 ---
 
-# 23. questionnaire_id 的来源
+# 23. target_id 的来源
 
 原则：
 
@@ -938,29 +1075,117 @@ AI修改问卷
 页面已经绑定：
 
 ```text
-questionnaire_id = q_001
+target_id = q_001
 ```
 
-后端创建 AI Session 时保存：
+后端创建 AI Conversation 时保存：
 
 ```json
 {
   "scene": "modify_questionnaire",
-  "questionnaire_id": "q_001"
+  "target_type": "questionnaire_instance",
+  "target_id": "q_001"
 }
 ```
 
-AI 在实际 Tool Calling 时仍然可以传入 questionnaire_id，但后端需要核对：
+AI 在实际 Tool Calling 时仍然可以传入 target_id，但后端需要核对：
 
 ```text
-Tool 参数 questionnaire_id
+Tool 参数 target_id
         ==
-Session 当前 questionnaire_id
+ToolContext.targetId（来自 Conversation）
 ```
 
-不一致则拒绝执行。
+不一致则拒绝执行，返回 `INVALID_TOOL_CONTEXT`。
 
 这样可以防止 AI 因上下文混淆修改错误问卷。
+
+---
+
+# 23A. 实例结构的可修改边界（决策 D1）
+
+> **问卷实例一旦下发，结构冻结。**
+
+## 23A.1 为什么
+
+```text
+调查员主要负责上门核查信息；
+具体要核查哪些内容，是下发人员决定的。
+
+因此「下发」这个动作，代表需要核查的内容已经布置清楚了。
+```
+
+## 23A.2 状态与可修改性
+
+| 实例状态 | 允许结构修改 | 说明 |
+| --- | --- | --- |
+| `draft` | ✅ | AI 修改的主要场景 |
+| `confirmed` | ✅ | 尚未下发，可改（reopen 语义） |
+| `dispatched` | ❌ | 必须撤回 |
+| `in_progress` | ❌ | 必须撤回 |
+| `submitted` | ❌ | 必须撤回 |
+| `under_review` | ❌ | 必须撤回 |
+| `returned` | ❌ | 先回到 `in_progress` 再撤回（见 `02-architecture.md` 第 21.3 节） |
+| `completed` | ❌ | 终态，只能新建实例 |
+
+## 23A.3 需要改动时的正确路径：撤回后二次下发
+
+```text
+dispatched / in_progress / submitted
+        │
+        │  POST /questionnaire-instances/{id}/withdraw
+        ↓
+      draft          ← 结构重新允许修改
+        │
+        │  修改（AI 或人工）
+        ↓
+    confirmed
+        │
+        │  二次下发
+        ↓
+    dispatched
+```
+
+撤回时必须处理的既有数据：
+
+```text
+1. questionnaire_responses
+   → status = withdrawn（不物理删除）
+
+2. questionnaire_answers
+   → 跟随 response 失效，不回滚、不删除
+
+3. dispatch_tasks
+   → status = withdrawn，记录 withdrawn_at / withdrawn_by
+
+4. current_revision
+   → 继续递增，历史 Revision 不清空
+```
+
+完整 API 定义见 `05-api_design.md`。
+
+## 23A.4 扶正为模板（决策 D2）
+
+实例上的临时改动，可以「保存为模板新版本」：
+
+```text
+Instance.current_schema
+        ↓
+POST /questionnaire-instances/{id}/promote
+        ↓
+Template Version Draft（status = draft，不直接发布）
+        ↓
+走正常模板发布流程
+```
+
+约束：
+
+> **扶正生成的必须是模板「草稿版本」，不是直接发布。**
+>
+> 正式模板的发布仍然必须经过模板版本治理。
+
+这样单个案件的特殊改动不会污染模板，
+但反复出现的同类需求可以正式沉淀进模板库。
 
 ---
 
@@ -1003,7 +1228,7 @@ Tool Validator 负责：
 检查：
 
 ```text
-questionnaire_id
+target_id
 section_id
 type
 title
@@ -1093,6 +1318,52 @@ AI Tool
 Business Service
 ```
 
+## 27.1 角色模型（决策 D8）
+
+`users` 表含 `roles` 字段（VARCHAR 数组），四类角色：
+
+```text
+template_admin      模板管理
+dispatcher          问卷创建 / 下发 / 撤回
+investigator        问卷填写
+reviewer            问卷审核
+```
+
+写入类 Tool 要求 `dispatcher` 或 `template_admin`；
+`investigator` / `reviewer` 只能读（`get_questionnaire`）。
+
+## 27.2 状态校验（同属执行前检查）
+
+权限之外还必须校验业务状态：
+
+见第 23A 节。若实例已下发：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "QUESTIONNAIRE_LOCKED",
+    "message": "问卷已下发，请先撤回后再修改"
+  }
+}
+```
+
+## 27.3 完整的执行前检查顺序
+
+```text
+1. Zod 参数校验（格式、题型与 options 匹配）
+2. target_id 一致性校验（对照 Conversation）
+3. 角色权限校验
+4. 实例状态校验（draft 才允许改）
+5. Domain Validation（节点存在性、结构合法性）
+        ↓
+全部通过后才进入 Questionnaire Service
+```
+
+**顺序不可调换，任何一步失败都不写数据库。**
+
+**这些校验全部由后端执行，不依赖 Prompt 约束。**
+
 ---
 
 # 28. Tool Result 标准格式
@@ -1175,6 +1446,16 @@ INVALID_OPERATION
 SYSTEM_ERROR
 ```
 
+补充（由已确认决策引入）：
+
+```text
+INVALID_TOOL_CONTEXT       Tool 参数 target_id 与 Conversation 不一致
+REVISION_CONFLICT          乐观锁冲突，需重新读取
+WITHDRAW_NOT_ALLOWED       当前状态不允许撤回
+PROMOTE_NOT_ALLOWED        当前状态不允许扶正为模板
+NESTED_SECTION_UNSUPPORTED add_section 传了 parent_section_id（V1 不支持）
+```
+
 ---
 
 # 32. Tool 调用的幂等性
@@ -1202,13 +1483,7 @@ add_question
 
 就可能得到两个完全一样的问题。
 
-V1 可以通过：
-
-```text
-operation_id
-```
-
-实现基础幂等控制。
+V1 通过 `operation_id` 实现幂等控制。
 
 例如：
 
@@ -1220,19 +1495,75 @@ interface ToolExecutionContext {
 }
 ```
 
-后端记录：
+## 32.1 幂等粒度（决策 D9）
+
+> **一次 Tool 调用 = 一个 `operation_id`。**
 
 ```text
-operation_id
+一次用户消息
+  └── LLM 回合
+        ├── Tool Call #1  → operation_id = op_001
+        ├── Tool Call #2  → operation_id = op_002
+        └── Tool Call #3  → operation_id = op_003
 ```
 
-如果相同 operation 已经成功执行：
+为什么不是「一次 LLM 回合一个 operation_id」：
 
 ```text
-直接返回原执行结果
+一轮里的多个 Tool 各自是独立的数据修改。
+若共用一个 operation_id，重试时无法判断
+「哪些 Tool 已成功、哪些需要重跑」，
+只能整轮回滚或整轮重放，两者都会破坏数据。
 ```
 
-而不是再次修改数据。
+## 32.2 实现方式：先查后插，不依赖 UNIQUE 冲突
+
+本文档早期版本表述为「相同 operation 已经成功执行 → 直接返回原执行结果」，
+但没有说明实现方式，容易被实现成「先 INSERT，靠 UNIQUE 报错来判重」。
+
+**那样做的问题：**
+
+```text
+ai_tool_executions.operation_id 上有 UNIQUE 约束。
+若实现为「INSERT 失败即视为重复」，
+则第二次重试会在数据库层抛异常，
+而不是干净地返回第一次的结果。
+```
+
+**正确实现：**
+
+```text
+BEGIN
+
+  SELECT * FROM ai_tool_executions
+   WHERE operation_id = $1
+
+  若查到且 success = true
+    → 直接返回已记录的 result，不修改问卷，COMMIT
+
+  若查到且 success = false
+    → 说明上次执行失败，允许重试（或返回同一失败）
+
+  若查不到
+    → 执行 Tool
+    → INSERT ai_tool_executions
+    → COMMIT
+
+END
+```
+
+`operation_id` 由 AI Orchestrator 为**每个 Tool Call** 生成 UUID v7，
+并写入日志，便于前端 `tool_call_start` / `tool_call_result` 事件配对
+（见 `05-api_design.md` 第 10.4 节）。
+
+## 32.3 注意 operation_id 与 trace_id 的区别
+
+```text
+operation_id  单个 Tool 调用的幂等键（本文档，D9）
+trace_id      一次用户请求的全链路追踪 ID（用于日志关联，可选）
+```
+
+两者不要混用：一次请求中有多个 `operation_id`，但只有一个 `trace_id`。
 
 ---
 
@@ -1246,7 +1577,9 @@ interface AiToolExecutionLog {
 
   conversation_id: string;
 
-  questionnaire_id: string;
+  target_id: string;          // 原 questionnaire_id，见第 22.1 节
+
+  operation_id: string;       // D9：每个 Tool 调用一个
 
   user_id: string;
 
@@ -1257,6 +1590,10 @@ interface AiToolExecutionLog {
   result: Record<string, unknown>;
 
   success: boolean;
+
+  error_code?: string;
+
+  model?: string;             // 建议记录，便于问题定位
 
   created_at: string;
 }
@@ -1340,6 +1677,51 @@ type AiScene =
   | "create_template"
   | "modify_questionnaire";
 ```
+
+## 36.0 Scene 与 target_type 的对应（避免规则冲突）
+
+`01-rpd.md` 第 8.4 节规定「AI 不得直接修改正式模板」，
+而 `create_template` 场景下 AI 确实在写模板相关数据。
+
+两者的区别在于 **target_type**：
+
+| Scene | target_type | AI 实际写入的对象 | 是否允许 |
+| --- | --- | --- | --- |
+| `create_template` | `template` | **Template Draft**（未发布版本） | ✅ 允许 |
+| `create_template` | `template_version`（已发布） | 已发布版本 | ❌ 拒绝 |
+| `modify_questionnaire` | `questionnaire_instance` | 问卷实例 | ✅ 允许 |
+| `modify_questionnaire` | `template_version` | 正式模板 | ❌ 拒绝 |
+
+因此：
+
+```text
+「不得修改正式模板」的准确含义是：
+  不得修改 status = published 的 template_version
+
+而不是：
+  不得对 template 相关的任何数据做写入
+```
+
+后端在 Tool 的 Context Validation 阶段检查：
+
+```text
+if (context.scene === "create_template") {
+  要求 target 指向的版本 status = draft
+}
+
+if (context.scene === "modify_questionnaire") {
+  要求 target_type = questionnaire_instance
+  且 实例 status = draft（见第 23A 节）
+}
+```
+
+违反则返回 `PERMISSION_DENIED` 或 `QUESTIONNAIRE_LOCKED`。
+
+> **本节的存在是为了让 Prompt 与后端校验口径一致。**
+>
+> 如果 Prompt 里只说「不能改模板」，模型在 create_template 场景会拒绝干活；
+> 如果后端不区分 draft 与 published，模型就可能改到已发布版本。
+> 两者必须以同一套 target_type 规则表达。
 
 ---
 
@@ -1656,6 +2038,48 @@ Revision 3
 ```
 
 这样 AI 每次操作都能够与一个明确的问卷状态对应。
+
+## 44.1 粒度：一次 Tool 调用 = 一次 Revision（D9）
+
+```text
+一条用户消息
+  → 可能触发多次增量 Tool 调用
+  → 因此可能产生多个 Revision
+```
+
+例如用户说「增加团伙调查模块，里面要调查有没有团伙以及团伙成员」：
+
+```text
+Revision 1 → add_section     产生 Revision 2
+Revision 2 → add_question    产生 Revision 3
+Revision 3 → add_question    产生 Revision 4
+```
+
+最终 `current_revision = 4`。
+
+**这不是缺陷，而是设计目标：**
+
+```text
+D2  扶正为模板版本时，需要「这次改了什么」的精确 diff
+    逐次 Revision 让任意一次 Tool 调用的效果都可独立还原
+
+D9  幂等以单次 Tool 调用为单位
+    Revision 粒度必须与 operation_id 粒度一致，
+    否则无法回答「这次重试是否会重复产生一批 Revision」
+```
+
+## 44.2 与事务边界的一致性
+
+```text
+一个 Tool 调用
+  = 一个 operation_id
+  = 一个数据库事务
+  = 一次 Revision 递增
+```
+
+四者必须严格对应。若未来需要把多个 Tool 合并成一个事务，
+必须同步调整 `operation_id` 粒度与 Revision 策略，
+不能只改其中一项。
 
 ---
 
