@@ -18,6 +18,7 @@ import { questionnaireService } from "../../../src/modules/questionnaire/service
 import { newId } from "../../../src/shared/utils/id.js";
 import {
   CTX,
+  assignInvestigator,
   countArtifacts,
   createTestInstance,
   deleteTestInstance,
@@ -281,9 +282,11 @@ describe("决策 D8：权限", () => {
     expect(result.revision).toBe(inst.initialRevision + 1);
   });
 
-  it("investigator 可以读取实例（只读权限）", async () => {
+  it("被指派的 investigator 可以读取实例（只读权限）", async () => {
     const inst = await createTestInstance();
     instanceId = inst.id;
+    // 横向授权要求先建立指派关系
+    await assignInvestigator(instanceId);
 
     const read = await questionnaireService.getInstance(
       instanceId,

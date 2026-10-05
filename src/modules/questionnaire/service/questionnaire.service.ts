@@ -232,6 +232,59 @@ function assertServiceContext(ctx: ServiceContext): void {
   assertUuid(ctx.userId, "userId");
 }
 
+/**
+ * 横向授权：谁能访问「这一个」问卷实例。
+ *
+ * 为什么需要它（审计发现的重大缺陷）：
+ *   早期实现只做纵向校验（角色能不能读问卷），
+ *   于是任何 dispatcher / investigator 只要拿到 uuid
+ *   就能读写**别人**的案件结构与答卷。
+ *
+ * 规则（依据决策 D8 与 02 文档第 24.1 节的职责划分）：
+ *   - template_admin：可访问（模板治理需要）
+ *   - dispatcher    ：只能访问自己创建的实例
+ *   - investigator  ：只能访问「被指派给自己」或「自己已填写」的实例
+ *   - reviewer      ：由 review 模块按答卷归属校验（此处放行角色检查）
+ *
+ * 返回 null 表示「实例不存在」，由调用方决定抛 404；
+ * 实例存在但无权访问时抛 403 —— 注意这里对「存在但无权」返回 403 而非 404，
+ * 便于前端与排查；若将来要求不泄露资源是否存在，可统一改为 404。
+ */
+async function resolveInstanceAccess(
+  instance: InstanceRecord,
+  ctx: ServiceContext
+): Promise<void> {
+  if (ctx.roles.includes("template_admin")) return;
+
+  if (ctx.roles.includes("dispatcher")) {
+    if (instance.createdBy === ctx.userId) return;
+    throw permissionDenied("无权访问他人创建的问卷实例");
+  }
+
+  if (ctx.roles.includes("investigator")) {
+    const assigned = await questionnaireRepository.hasDispatchAssignment(
+      instance.id,
+      ctx.userId
+    );
+    if (assigned) return;
+
+    const responded = await questionnaireRepository.hasRespondedTo(
+      instance.id,
+      ctx.userId
+    );
+    if (responded) return;
+
+    throw permissionDenied("该问卷任务未指派给你");
+  }
+
+  // reviewer：审核入口另有按答卷归属的校验，这里只要求角色具备读权限
+  if (ctx.roles.includes("reviewer")) return;
+
+  throw permissionDenied(
+    `当前用户角色 [${ctx.roles.join(", ")}] 无权访问问卷实例`
+  );
+}
+
 // ============================================================
 // Service
 // ============================================================
@@ -261,6 +314,10 @@ export const questionnaireService = {
         `问卷实例不存在：${instanceId}`
       );
     }
+
+    // 横向授权：角色够不代表能看这一份
+    await resolveInstanceAccess(instance, ctx);
+
     return instance;
   },
 
@@ -904,6 +961,32 @@ export const questionnaireService = {
         );
       }
 
+      // ---- 按 05 文档第 13A.4 节处理既有数据 ----
+      // 撤回不只是把实例改回 draft：已经产生的填写结果与下发任务
+      // 必须一并标记失效，否则二次下发时调查员会拿回一条不可写的旧答卷
+      // （审计发现的高危缺陷）。
+      const withdrawnAt = new Date();
+
+      const affectedResponses = await tx.questionnaireResponse.updateMany({
+        where: {
+          questionnaireInstanceId: instanceId,
+          status: { in: ["draft", "submitted"] },
+        },
+        data: { status: "withdrawn" },
+      });
+
+      const affectedTasks = await tx.dispatchTask.updateMany({
+        where: {
+          questionnaireInstanceId: instanceId,
+          status: { in: ["pending", "dispatched"] },
+        },
+        data: {
+          status: "withdrawn",
+          withdrawnAt,
+          withdrawnBy: ctx.userId,
+        },
+      });
+
       const updated = await questionnaireRepository.updateInstanceStatus(
         { instanceId, status: "draft" },
         tx
@@ -913,9 +996,15 @@ export const questionnaireService = {
         {
           operationId: ctx.operationId ?? newId(),
           source: ctx.source ?? "rest",
-          toolName: "withdraw_instance",          instanceId,
+          toolName: "withdraw_instance",
+          instanceId,
           arguments: { reason: reason ?? null },
-          result: { from: instance.status, to: "draft" },
+          result: {
+            from: instance.status,
+            to: "draft",
+            withdrawnResponses: affectedResponses.count,
+            withdrawnTasks: affectedTasks.count,
+          },
           success: true,
         },
         tx

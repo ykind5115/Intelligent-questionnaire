@@ -26,6 +26,7 @@ import { templateService } from "../../../src/modules/questionnaire/service/temp
 import {
   CTX,
   USERS,
+  assignInvestigator,
   countArtifacts,
   createTestInstance,
   deleteTestInstance,
@@ -624,9 +625,11 @@ describe("get_questionnaire", () => {
     expect(log?.toolName).toBe("get_questionnaire");
   });
 
-  it("investigator 可以读（只读角色）", async () => {
+  it("被指派的 investigator 可以读（只读角色）", async () => {
     const inst = await createTestInstance();
     instanceId = inst.id;
+    // 横向授权要求先建立指派关系
+    await assignInvestigator(instanceId);
 
     const result = await runTool(
       "get_questionnaire",

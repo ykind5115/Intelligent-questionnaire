@@ -13,7 +13,11 @@ import {
   startTestServer,
   type TestHttpClient,
 } from "./helpers.js";
-import { USERS } from "../questionnaire/helpers.js";
+import {
+  USERS,
+  assignInvestigator,
+  deleteTestInstance,
+} from "../questionnaire/helpers.js";
 import { newId } from "../../../src/shared/utils/id.js";
 
 let client: TestHttpClient;
@@ -25,18 +29,17 @@ const createdInstanceIds = new Set<string>();
 
 async function cleanup(): Promise<void> {
   for (const id of createdInstanceIds) {
-    await prisma.aiToolExecution.deleteMany({
-      where: { questionnaireInstanceId: id },
-    });
-    await prisma.questionnaireRevision.deleteMany({
-      where: { questionnaireInstanceId: id },
-    });
+    // 复用共享 helper：它按外键依赖顺序清理
+    // review_records → answers → responses → dispatch_tasks
+    // → ai_tool_executions → revisions → instance。
+    // 本文件自己手写过一遍，漏掉了 dispatch_tasks，导致加了「指派」之后
+    // 清理撞外键、失败数据残留并污染后续用例。
     // 模板版本可能引用实例（扶正来源），先断开该引用
     await prisma.questionnaireTemplateVersion.updateMany({
       where: { sourceInstanceId: id },
       data: { sourceInstanceId: null },
     });
-    await prisma.questionnaireInstance.deleteMany({ where: { id } });
+    await deleteTestInstance(id);
   }
   createdInstanceIds.clear();
 
@@ -442,7 +445,7 @@ describe("问卷实例 API", () => {
     expect(res.body.error?.code).toBe("INVALID_STATUS_TRANSITION");
   });
 
-  it("实例详情可读；investigator 也能读", async () => {
+  it("实例详情可读；被指派的 investigator 也能读", async () => {
     const { versionId } = await createPublishedVersion("测试模板-实例详情");
 
     const createRes = await apiRequest(
@@ -457,6 +460,9 @@ describe("问卷实例 API", () => {
     const instance = expectData<{ id: string }>(createRes);
     createdInstanceIds.add(instance.id);
 
+    // 横向授权要求：investigator 只能读「指派给自己」的实例
+    await assignInvestigator(instance.id);
+
     const res = await apiRequest(
       client,
       "GET",
@@ -466,6 +472,33 @@ describe("问卷实例 API", () => {
     expect(res.status).toBe(200);
     const data = expectData<{ id: string; title: string }>(res);
     expect(data.title).toBe("李四 - 测试");
+  });
+
+  it("横向越权：未被指派的 investigator 读他人实例 → 403", async () => {
+    const { versionId } = await createPublishedVersion("测试模板-越权读取");
+
+    const createRes = await apiRequest(
+      client,
+      "POST",
+      "/api/v1/questionnaire-instances",
+      {
+        userId: USERS.dispatcher,
+        body: { templateVersionId: versionId, title: "别人创建的案件" },
+      }
+    );
+    const instance = expectData<{ id: string }>(createRes);
+    createdInstanceIds.add(instance.id);
+
+    // 不建立任何指派关系
+    const res = await apiRequest(
+      client,
+      "GET",
+      `/api/v1/questionnaire-instances/${instance.id}`,
+      { userId: USERS.investigator }
+    );
+
+    expect(res.status).toBe(403);
+    expect(res.body.error?.code).toBe("PERMISSION_DENIED");
   });
 
   it("实例不存在返回 404", async () => {

@@ -103,8 +103,26 @@ export async function createTestInstance(
   return { id: instanceId, initialRevision: 1, status };
 }
 
-/** 清理测试实例及其关联数据 */
+/**
+ * 清理测试实例及其关联数据。
+ *
+ * 删除顺序必须遵守外键依赖（这些子表都没有级联删除）：
+ *   review_records → answers → responses → dispatch_tasks
+ *   → ai_tool_executions → revisions → instance
+ */
 export async function deleteTestInstance(instanceId: string): Promise<void> {
+  await prisma.reviewRecord.deleteMany({
+    where: { response: { questionnaireInstanceId: instanceId } },
+  });
+  await prisma.questionnaireAnswer.deleteMany({
+    where: { response: { questionnaireInstanceId: instanceId } },
+  });
+  await prisma.questionnaireResponse.deleteMany({
+    where: { questionnaireInstanceId: instanceId },
+  });
+  await prisma.dispatchTask.deleteMany({
+    where: { questionnaireInstanceId: instanceId },
+  });
   await prisma.aiToolExecution.deleteMany({
     where: { questionnaireInstanceId: instanceId },
   });
@@ -169,4 +187,37 @@ export async function deleteTestConversation(id: string): Promise<void> {
   await prisma.aiToolExecution.deleteMany({ where: { conversationId: id } });
   await prisma.aiMessage.deleteMany({ where: { conversationId: id } });
   await prisma.aiConversation.deleteMany({ where: { id } });
+}
+
+/**
+ * 给某个实例指派一名调查人员（建一条下发任务）。
+ *
+ * 为什么测试需要它：
+ *   横向授权要求「investigator 只能访问被指派给自己的实例」，
+ *   因此凡是要让 investigator 成功读到/填写某实例的测试，
+ *   都必须先建立指派关系，否则会（正确地）收到 403。
+ */
+export async function assignInvestigator(
+  instanceId: string,
+  options: { assignedTo?: string; status?: string } = {}
+): Promise<string> {
+  const id = newId();
+  await prisma.dispatchTask.create({
+    data: {
+      id,
+      questionnaireInstanceId: instanceId,
+      assignedTo: options.assignedTo ?? USERS.investigator,
+      dispatchedBy: USERS.dispatcher,
+      status: options.status ?? "dispatched",
+      dispatchedAt: new Date(),
+    },
+  });
+  return id;
+}
+
+/** 清理实例下的下发任务（deleteTestInstance 不含它） */
+export async function deleteDispatchTasks(instanceId: string): Promise<void> {
+  await prisma.dispatchTask.deleteMany({
+    where: { questionnaireInstanceId: instanceId },
+  });
 }

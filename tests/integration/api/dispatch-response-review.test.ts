@@ -522,8 +522,20 @@ describe("填写 API（05 文档第 15 节）", () => {
     ).toBe(1);
   });
 
-  it("获取待填写问卷：实例未下发 → 409", async () => {
+  it("获取待填写问卷：已指派但实例未下发 → 409", async () => {
     const instanceId = await newTestInstance("confirmed");
+
+    // 新规则要求「必须被指派」才能填写（横向授权），
+    // 因此这里先建一条指派给 investigator1 的下发任务但不执行下发，
+    // 这样才能验证到「实例未下发 → 409」这一层。
+    const created = await call("POST", "/api/v1/dispatch-tasks", {
+      userId: USERS.dispatcher,
+      body: {
+        questionnaireInstanceId: instanceId,
+        assignedTo: USERS.investigator,
+      },
+    });
+    expect(created.status).toBe(201);
 
     const res = await call(
       "GET",
@@ -533,6 +545,20 @@ describe("填写 API（05 文档第 15 节）", () => {
 
     expect(res.status).toBe(409);
     expect(failureOf(res).code).toBe("INVALID_STATUS_TRANSITION");
+  });
+
+  it("获取待填写问卷：未指派给该调查员 → 403（横向授权）", async () => {
+    const instanceId = await newTestInstance("confirmed");
+
+    // 故意不建任何下发任务
+    const res = await call(
+      "GET",
+      `/api/v1/questionnaire-instances/${instanceId}/response`,
+      { userId: USERS.investigator }
+    );
+
+    expect(res.status).toBe(403);
+    expect(failureOf(res).code).toBe("PERMISSION_DENIED");
   });
 
   it("保存单题答案：写入 answer 与正确的 revision_no", async () => {

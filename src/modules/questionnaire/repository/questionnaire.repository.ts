@@ -120,8 +120,67 @@ export const questionnaireRepository = {
     return parseSchema(row.schemaSnapshot, `修订 ${instanceId}#${revisionNo}`);
   },
 
-  /** 列出实例的修订历史（不含快照内容，避免列表接口过大） */
-  async listRevisions(
+  /**
+   * 查询某用户是否被指派了该实例的调查任务。
+   *
+   * 用途：横向授权校验（决策 D8 的落地）。
+   * 调查人员只应看到/填写「指派给自己」的问卷，
+   * 而不是任意 uuid 都能进入。
+   */
+  async hasDispatchAssignment(
+    instanceId: string,
+    userId: string,
+    client: DbClient = prisma
+  ): Promise<boolean> {
+    const found = await client.dispatchTask.findFirst({
+      where: {
+        questionnaireInstanceId: instanceId,
+        assignedTo: userId,
+      },
+      select: { id: true },
+    });
+    return found !== null;
+  },
+
+  /** 查询某用户是否是该实例的调查对象答卷填写人 */
+  async hasRespondedTo(
+    instanceId: string,
+    userId: string,
+    client: DbClient = prisma
+  ): Promise<boolean> {
+    const found = await client.questionnaireResponse.findFirst({
+      where: {
+        questionnaireInstanceId: instanceId,
+        respondentId: userId,
+      },
+      select: { id: true },
+    });
+    return found !== null;
+  },
+
+  /** 按 id 读取答卷（含所属实例，便于做归属校验） */
+  async findResponseById(
+    responseId: string,
+    client: DbClient = prisma
+  ): Promise<{
+    id: string;
+    questionnaireInstanceId: string;
+    respondentId: string;
+    status: string;
+  } | null> {
+    const row = await client.questionnaireResponse.findUnique({
+      where: { id: responseId },
+      select: {
+        id: true,
+        questionnaireInstanceId: true,
+        respondentId: true,
+        status: true,
+      },
+    });
+    return row;
+  },
+
+  /** 列出实例的修订历史（不含快照内容，避免列表接口过大） */  async listRevisions(
     instanceId: string,
     client: DbClient = prisma
   ): Promise<

@@ -39,6 +39,16 @@ import type { ServiceContext } from "../../questionnaire/service/questionnaire.s
 
 /** 填写类写操作的角色（决策 D8） */
 export const RESPONSE_WRITE_ROLES = ["investigator"] as const;
+
+/**
+ * 可以继续填写的答卷状态。
+ *
+ * - draft：正常填写中
+ * 已提交（submitted）与撤回失效（withdrawn）都不在其中：
+ *   前者不允许再改；后者属于上一轮下发，二次下发时应新建一条 draft 答卷，
+ *   否则调查员会被困在一条不可写的旧答卷上（审计发现的高危缺陷）。
+ */
+export const RESPONSE_FILLABLE_STATUSES = ["draft"] as const;
 /** 填写结果的读操作角色 */
 export const RESPONSE_READ_ROLES = [
   "investigator",
@@ -206,10 +216,34 @@ async function writeAudit(
   });
 }
 
+/**
+ * 横向授权：答卷只能由「填写人本人」操作。
+ *
+ * 为什么需要它（审计发现的重大缺陷）：
+ *   早期实现只做纵向校验（角色能不能填写），
+ *   于是任何 investigator 只要拿到 responseId
+ *   就能改写、提交**别人**的答卷。
+ *
+ * 依据：决策 D8 + 04 文档第 26 节
+ *   （questionnaire_responses.respondent_id 是实际填写人）。
+ */
+function assertResponseOwnership(
+  response: { respondentId: string },
+  ctx: ServiceContext
+): void {
+  // 模板管理员是系统治理角色，允许查看与协助
+  if (ctx.roles.includes("template_admin")) return;
+
+  if (response.respondentId !== ctx.userId) {
+    throw permissionDenied("该答卷的填写人不是你，无权修改或提交");
+  }
+}
+
 /** 读取 response + 其所属实例与结构；response 不存在时抛 RESPONSE_NOT_FOUND */
 async function loadResponseContext(
   tx: Tx,
-  responseId: string
+  responseId: string,
+  ctx: ServiceContext
 ): Promise<{
   response: ResponseRecord;
   instance: {
@@ -229,6 +263,9 @@ async function loadResponseContext(
       `填写结果不存在：${responseId}`
     );
   }
+
+  // 横向授权：只能操作自己的答卷
+  assertResponseOwnership(response, ctx);
 
   const instance = await tx.questionnaireInstance.findUnique({
     where: { id: response.questionnaireInstanceId },
@@ -305,12 +342,31 @@ async function getOrCreateResponse(
 
     const schema = parseSchema(instance.currentSchema, `实例 ${instanceId}`);
 
+    // ---- 横向授权：必须是「指派给自己」或「自己已填写过」的任务 ----
+    // 依据决策 D8 与 04 文档第 25 节（dispatch_tasks.assigned_to 决定谁能上门核查）。
+    // 早期实现在这里完全缺失校验，任何 investigator 拿到 uuid 就能填写他人任务。
+    const assigned = await tx.dispatchTask.findFirst({
+      where: { questionnaireInstanceId: instanceId, assignedTo: ctx.userId },
+      select: { id: true },
+    });
+    const alreadyResponded = await tx.questionnaireResponse.findFirst({
+      where: { questionnaireInstanceId: instanceId, respondentId: ctx.userId },
+      select: { id: true },
+    });
+
+    if (!assigned && !alreadyResponded) {
+      throw permissionDenied("该问卷任务未指派给你，无法填写");
+    }
+
     let response = await tx.questionnaireResponse.findFirst({
       where: {
         questionnaireInstanceId: instanceId,
         respondentId: ctx.userId,
+        // 只复用「还能填」的答卷：已提交的、以及撤回时置为 withdrawn 的，
+        // 都不应该被二次下发后的新一轮填写复用
+        status: { in: [...RESPONSE_FILLABLE_STATUSES] },
       },
-      orderBy: { createdAt: "asc" },
+      orderBy: { createdAt: "desc" },
     });
 
     if (!response) {
@@ -406,7 +462,8 @@ async function saveAnswers(
   return transaction(async (tx: Tx) => {
     const { response, instance, schema } = await loadResponseContext(
       tx,
-      responseId
+      responseId,
+      ctx
     );
 
     if (response.status !== "draft") {
@@ -488,7 +545,8 @@ async function submitResponse(
   return transaction(async (tx: Tx) => {
     const { response, instance, schema } = await loadResponseContext(
       tx,
-      responseId
+      responseId,
+      ctx
     );
 
     if (response.status !== "draft") {
@@ -496,6 +554,25 @@ async function submitResponse(
         ErrorCode.INVALID_STATUS_TRANSITION,
         `填写结果状态为 ${response.status}，只有 draft 可以提交`,
         { path: "status", status: response.status, expected: "draft" }
+      );
+    }
+
+    // 实例状态必须仍在「可填写」范围内：
+    // 否则「已完成(completed)」会被另一条 draft 答卷拉回 submitted，
+    // 让审核结论被无声作废（审计发现的缺陷）。
+    if (
+      !(FILLABLE_INSTANCE_STATUSES as readonly string[]).includes(
+        instance.status
+      )
+    ) {
+      throw new OperationError(
+        ErrorCode.INVALID_STATUS_TRANSITION,
+        `实例状态为 ${instance.status}，不能提交答卷`,
+        {
+          path: "status",
+          status: instance.status,
+          expected: FILLABLE_INSTANCE_STATUSES,
+        }
       );
     }
 
