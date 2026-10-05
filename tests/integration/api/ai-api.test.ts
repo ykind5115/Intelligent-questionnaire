@@ -257,6 +257,7 @@ describe("POST /ai/conversations", () => {
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
     expect(typeof res.body.data?.["conversationId"]).toBe("string");
+    createdConversations.push(res.body.data?.["conversationId"] as string);
     expect(res.body.data?.["scene"]).toBe("modify_questionnaire");
     expect(res.body.data?.["targetType"]).toBe("questionnaire_instance");
     expect(res.body.data?.["targetId"]).toBe(inst.id);
@@ -653,6 +654,8 @@ describe("AI 创建模板（create_template 场景）", () => {
     expect(res.status).toBe(201);
     expect(res.body.data?.["scene"]).toBe("create_template");
     expect(res.body.data?.["targetType"]).toBe("template");
+    // 登记以便 afterEach 清理，避免测试在开发库里堆残留会话
+    createdConversations.push(res.body.data?.["conversationId"] as string);
   });
 
   it("通过对话让 AI 往模板里写分组和问题，并落库", async () => {
@@ -667,6 +670,7 @@ describe("AI 创建模板（create_template 场景）", () => {
       },
     });
     const conversationId = conv.body.data?.["conversationId"] as string;
+    createdConversations.push(conversationId);
 
     // 假 Provider：建一个分组后收尾
     // （不在此处 add_question —— 真实模型要从上一轮 Tool Result 里取 section_id，
@@ -717,6 +721,7 @@ describe("AI 创建模板（create_template 场景）", () => {
       },
     });
     const conversationId = conv.body.data?.["conversationId"] as string;
+    createdConversations.push(conversationId);
 
     // 先试空问卷 commit → 422
     const empty = await request(
@@ -816,6 +821,7 @@ describe("AI 创建模板（create_template 场景）", () => {
       },
     });
     const conversationId = conv.body.data?.["conversationId"] as string;
+    createdConversations.push(conversationId);
 
     const res = await request(
       "POST",
