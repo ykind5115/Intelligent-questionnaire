@@ -14,7 +14,7 @@
  *   - 不直接写 SQL（那是 Repository 的事）
  */
 import { transaction, type Tx } from "../../../database/transaction.js";
-import { newId } from "../../../shared/utils/id.js";
+import { newId, uuidValidate } from "../../../shared/utils/id.js";
 import {
   ErrorCode,
   OperationError,
@@ -23,6 +23,7 @@ import {
   sectionNotFound,
   questionNotFound,
   revisionConflict,
+  validationError,
 } from "../../../shared/errors/index.js";
 import {
   addQuestion,
@@ -74,6 +75,15 @@ export interface ServiceContext {
   conversationId?: string;
   messageId?: string;
   model?: string;
+  /**
+   * 审计日志里记录的操作名。
+   *
+   * 为什么需要它：REST 路由与 AI Tool 调用的方法名相同（例如都是 addQuestion），
+   * 但在审计里应该能区分是「哪个入口进来的」，
+   * 因此由调用方显式给出工具名（如 add_question）。
+   * 不传时回退为内部操作名。
+   */
+  auditToolName?: string;
   /** 可注入的 ID 生成器（测试用） */
   idFactory?: IdFactory;
 }
@@ -186,6 +196,26 @@ function assertInstanceWritable(instance: InstanceRecord): void {
   }
 }
 
+/**
+ * 校验 operationId 格式。
+ *
+ * 为什么要显式校验而不是交给数据库报错：
+ *   operation_id 是 uuid 列。如果传入非法字符串，
+ *   会先走完整个业务逻辑，最后在「写审计日志」时才由数据库抛出
+ *   invalid input syntax for type uuid —— 此时错误码已丢失（变成 SYSTEM_ERROR），
+ *   调用方无法判断究竟是幂等冲突、校验失败还是系统故障。
+ *
+ * 因此在这里提前失败，并给出明确错误码。
+ */
+function assertValidOperationId(operationId: string | undefined): void {
+  if (operationId !== undefined && !uuidValidate(operationId)) {
+    throw validationError(
+      `operationId 必须是合法 UUID，收到：${operationId}`,
+      { path: "operationId", operationId }
+    );
+  }
+}
+
 // ============================================================
 // Service
 // ============================================================
@@ -219,6 +249,41 @@ export const questionnaireService = {
   },
 
   // ----------------------------------------------------------
+  // 读取审计
+  // ----------------------------------------------------------
+
+  /**
+   * 记录一次「读取问卷结构」的操作。
+   *
+   * 依据 08 文档第 47 节：AI 的每一次 Tool Calling 都应记录，
+   * 读取类工具（get_questionnaire）同样属于 Tool Calling，
+   * 因此需要留痕，否则无法复盘「模型当时看到的是哪一版结构」。
+   *
+   * 与写入类不同的是：这不改变任何数据，也不在事务中，
+   * 因此失败不应影响调用方（调用方按需忽略异常）。
+   */
+  async recordReadAudit(
+    instanceId: string,
+    ctx: ServiceContext,
+    result: { revision: number }
+  ): Promise<void> {
+    await questionnaireRepository.createAuditLog({
+      operationId: ctx.operationId ?? newId(),
+      source: ctx.source ?? "rest",
+      toolName: ctx.auditToolName ?? "get_questionnaire",
+      instanceId,
+      arguments: { instanceId },
+      result,
+      success: true,
+      ...(ctx.conversationId !== undefined
+        ? { conversationId: ctx.conversationId }
+        : {}),
+      ...(ctx.messageId !== undefined ? { messageId: ctx.messageId } : {}),
+      ...(ctx.model !== undefined ? { model: ctx.model } : {}),
+    });
+  },
+
+  // ----------------------------------------------------------
   // 对「问卷实例」应用一次操作（AI 修改实例 / 人工编辑实例）
   // ----------------------------------------------------------
 
@@ -241,6 +306,7 @@ export const questionnaireService = {
     options: { expectedRevision?: number } = {}
   ): Promise<ApplyResult> {
     assertCanWriteStructure(ctx);
+    assertValidOperationId(ctx.operationId);
 
     const operationId = ctx.operationId ?? newId();
     const ids = ctx.idFactory ?? uuidIdFactory;
@@ -327,7 +393,7 @@ export const questionnaireService = {
         {
           operationId,
           source: ctx.source ?? "rest",
-          toolName: payload.name,
+          toolName: ctx.auditToolName ?? payload.name,
           instanceId,
           arguments: payload.input,
           result: {
@@ -368,6 +434,7 @@ export const questionnaireService = {
     ctx: ServiceContext
   ): Promise<ApplyResult> {
     assertCanWriteStructure(ctx);
+    assertValidOperationId(ctx.operationId);
 
     const operationId = ctx.operationId ?? newId();
     const ids = ctx.idFactory ?? uuidIdFactory;
@@ -411,7 +478,7 @@ export const questionnaireService = {
         {
           operationId,
           source: ctx.source ?? "rest",
-          toolName: payload.name,
+          toolName: ctx.auditToolName ?? payload.name,
           arguments: payload.input,
           result: outcome.details,
           success: true,
@@ -485,6 +552,7 @@ export const questionnaireService = {
     reason?: string
   ): Promise<{ id: string; status: string }> {
     assertCanWriteStructure(ctx);
+    assertValidOperationId(ctx.operationId);
 
     const WITHDRAWABLE = [
       "dispatched",
@@ -524,8 +592,7 @@ export const questionnaireService = {
         {
           operationId: ctx.operationId ?? newId(),
           source: ctx.source ?? "rest",
-          toolName: "withdraw_instance",
-          instanceId,
+          toolName: "withdraw_instance",          instanceId,
           arguments: { reason: reason ?? null },
           result: { from: instance.status, to: "draft" },
           success: true,
