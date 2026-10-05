@@ -1,0 +1,25 @@
+# 统一行尾，避免 Windows 下 Git 自动转换造成的噪音与 diff 污染。
+#
+# 背景：本仓库的 markdown 设计文档是 CRLF，
+# 而代码与配置文件是 LF，如果不固定规则，
+# Git 会在检出时把 LF 换成 CRLF，导致：
+#   1. 每次 git add 都刷一堆 "LF will be replaced by CRLF" 警告；
+#   2. 跨平台协作时产生整文件级的无意义 diff。
+#
+# 策略：仓库内统一存 LF，工作区检出也保持 LF（不自动转换）。
+
+* text=auto eol=lf
+
+# 明确二进制文件，避免被当成文本处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+
+# 锁文件与生成产物不参与 diff 统计
+pnpm-lock.yaml -diff
