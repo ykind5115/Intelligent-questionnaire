@@ -1,416 +1,377 @@
 # 智能问卷系统
 
-> **面向调查业务的 AI 辅助问卷生成与动态编排系统**
->
-> V1 核心：把「自然语言 → 结构化问卷」这条链路做可靠，
-> 并支持针对具体案件临时调整问卷而不污染正式模板。
+AI 辅助的问卷生成与动态编排系统。用自然语言描述调查需求，AI 把它变成结构化问卷；
+案件办理过程中需要临时加字段时，也由 AI 完成，且**不会污染原始模板**。
 
----
+## 这个项目解决什么问题
 
-## 1. 这个项目解决什么问题
+传统问卷系统的痛点：问卷在创建时就定死了。但调查办案是动态的 ——
+调查张三时发现要问团伙关系，调查李四时要问飞行记录。
+如果每个案件都要新建一份模板，模板库很快就会被「张三专用」「李四专用」淹没。
 
-标准问卷模板只能覆盖某类业务的通用内容，但具体案件常有额外的重点调查需求。
+本系统的做法：
 
-例如做「无人机黑飞核查」时，某个调查对象需要重点关注：
+- **模板** 提供基线结构；**实例**（案件）复制一份后可自由增删题目
+- 增删改都由 **AI 通过工具调用**完成，用户只需说人话
+- 每次改动都留下 **Revision 快照**，可追溯、可比对
+- 真正有复用价值的个案结构，可以「**扶正**」为新的模板草稿版本
+- 一旦问卷**下发**，结构就冻结（决策 D1）；要改必须先撤回，避免已填答案失效
 
-- 是否存在团伙
-- 与哪些人员存在关联
-- 最近半年去过哪些地方
+## 技术栈
 
-而这些字段标准模板里没有。为此单独建一个正式模板成本高，还会让模板库塞满只用过一次的模板。
+| 层 | 选型 | 说明 |
+|---|---|---|
+| 语言 | TypeScript 5.9（strict） | ESM + NodeNext，相对导入需带 `.js` |
+| 运行时 | Node.js ≥ 22 | |
+| Web | Express 5 | |
+| 数据库 | PostgreSQL | 本地开发用 `prisma dev` 提供的实例 |
+| ORM | Prisma 7.10.0（锁定版本） | 经 `@prisma/adapter-pg` 走驱动适配器 |
+| 校验 | Zod 4 | 同一套 Schema 复用于 AI 参数、HTTP 请求、结构定义 |
+| 测试 | Vitest 3 | 集成测试直连真实数据库 |
+| 前端 | 原生 HTML/CSS/JS | 无构建链，内网可直接部署 |
 
-本系统的做法是：
-
-```text
-标准模板
-   ↓
-创建问卷实例（克隆出独立结构）
-   ↓
-AI 按本次案件的特殊需求修改【实例】
-   ↓
-下发 → 填写 → 提交 → 审核
-```
-
-**核心原则：AI 只改实例，永不污染正式模板。**
-
-同时，「创建问卷」和「临时修改问卷」都改为 NL2RESULT：
-用户用自然语言描述需求，AI 通过**受控的结构化工具**修改问卷。
-
----
-
-## 2. 当前进度
-
-| 阶段 | 状态 |
-| --- | --- |
-| 需求 / 架构 / Schema / 数据库 / API / 项目结构 设计文档 | ✅ 完成 |
-| 设计评审与决策固化（D1~D13） | ✅ 完成 |
-| 工程骨架（依赖、TS 配置、Prisma schema、12 张表迁移） | ✅ 完成 |
-| 测试数据 seed（4 个账号 + 2 套模板 + 1 个实例） | ✅ 完成 |
-| 最小 HTTP 服务 + 开发态鉴权链路 | ✅ 完成 |
-| Questionnaire Operation 层（add/update/remove/move，纯函数） | ✅ 完成 |
-| Questionnaire Repository（乐观锁 + Revision + 审计） | ✅ 完成 |
-| Questionnaire Service（权限 D8 + 状态校验 D1 + 事务 + 幂等 D9） | ✅ 完成 |
-| 7 个 AI Tool + Tool Registry（含 JSON Schema 生成） | ✅ 完成 |
-| LLM Provider 抽象 + DeepSeek 实现（决策 D12） | ✅ 完成 |
-| AI Orchestrator（上下文 + Tool 循环 + 轮数上限 + 幂等） | ✅ 完成 |
-| AI 会话落库（ai_conversations / ai_messages 读写与历史回放） | ✅ 完成 |
-| REST API：模板 / 实例 / AI 会话 / 下发 / 填写 / 审核 | ✅ 完成 |
-| 统一响应结构、错误码 → HTTP 状态码映射 | ✅ 完成 |
-| 测试：44 单元 + 146 集成，共 190 例全绿 | ✅ 完成 |
-| AI 评测用例集（决策 D5：量化「AI 生成/修改成功率」） | ⬜ 下一步 |
-| 前端简要实现（结构树 + 对话 + 确认/下发） | ⬜ |
-| 真实模型端到端验证（需 `AI_API_KEY`） | ⬜ |
-| 人工编辑器（上线前兜底，决策 D3） | ⬜ 最后 |
-
----
-
-## 3. 技术栈
-
-```text
-Runtime    Node.js 22
-Language   TypeScript（strict）
-HTTP       Express 5
-ORM        Prisma 7.10.0（锁定版本，决策 D10）
-Database   PostgreSQL（本机由 prisma dev 提供，决策 D7）
-Validation Zod
-Model      DeepSeek deepseek-v41-flash（决策 D12）
-```
-
-> **模型接口调用需要 `AI_API_KEY`。** 未配置时不会崩溃，
-> 而是在真正调用模型时返回明确的 `AI_API_KEY_MISSING` 错误。
-> Tool 层、Service 层与全部 110 个测试都不需要真实 Key
-> （Orchestrator 测试用假 Provider 驱动）。
-
-**已预留的迁移能力（决策 D13）**：后期整体迁到内网、模型接口换成自研服务时，
-只需改 `.env` 里的 `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` 与 `DATABASE_URL`，
-业务代码不动。
-
----
-
-## 4. 快速开始
-
-### 4.1 环境要求
-
-```text
-Node.js >= 22
-pnpm    >= 11
-```
-
-不需要单独安装 PostgreSQL，也不需要 Docker —— 本地数据库由 `prisma dev` 提供。
-
-### 4.2 安装与初始化
+## 快速开始
 
 ```bash
 # 1. 安装依赖
+#    注意：必须先确认 pnpm-workspace.yaml 里的 allowBuilds 已包含
+#    prisma / @prisma/engines / esbuild，否则 pnpm 会跳过这些包的构建脚本，
+#    导致 pnpm exec 完全不可用（详见 docs/06 第 3B 节）
 pnpm install
 
-# 2. 确认 pnpm-workspace.yaml 中的 allowBuilds 已包含
-#    prisma / @prisma/engines / esbuild
-#    （pnpm 11 默认拦截构建脚本，漏掉会导致安装失败）
-
-# 3. 准备环境变量
+# 2. 准备环境变量
 cp .env.example .env
 
-# 4. 启动本地数据库（后台运行）
+# 3. 启动本地数据库（Prisma 提供的免安装 Postgres）
 pnpm exec prisma dev -d
 
-# 5. 把上一步输出的【直连 TCP 地址】填进 .env 的 DATABASE_URL
-#    形如 postgres://postgres:postgres@localhost:51214/template1?sslmode=disable
-#    注意：不要用 prisma+postgres:// 代理地址，迁移需要 shadow database
-#    可随时用 pnpm exec prisma dev ls 查看当前地址
+# 4. 建表 + 灌入种子数据
+pnpm db:push
+pnpm db:seed        # 会打印 4 个测试账号的 UUID
 
-# 6. 建表
-pnpm exec prisma migrate dev
-
-# 7. 生成客户端
-pnpm exec prisma generate
-
-# 8. 写入测试数据
-pnpm db:seed
-
-# 9. 启动服务
-pnpm dev
+# 5. 启动服务
+pnpm dev            # http://127.0.0.1:3000
 ```
 
-服务启动后：
+然后打开 **http://127.0.0.1:3000** 就是工作台页面。
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `NODE_ENV` | `development` | `production` 时强制要求真实鉴权与 `AI_BASE_URL` |
+| `PORT` | `3000` | |
+| `DATABASE_URL` | 无（必填） | `prisma dev` 会打印这个值 |
+| `AI_BASE_URL` | 空 | **生产环境必填**（决策 D13） |
+| `AI_API_KEY` | 空 | 没有它就只能用假 Provider 跑测试 |
+| `AI_MODEL` | `deepseek-v41-flash` | 决策 D12 |
+
+迁内网只需改这三项 AI 配置，代码无需改动（Provider 层是厂商中立的）。
+
+## 目录结构
+
+```text
+src/
+  app/                      Express 装配：路由、中间件、统一响应与错误处理
+  config/env.ts             配置读取唯一入口（业务代码不得直接读 process.env）
+  database/                 Prisma 客户端与事务封装（连接池参数在此调整）
+  shared/
+    auth/                   开发态鉴权中间件（x-user-id）
+    errors/                 错误码 → HTTP 状态映射
+    utils/                  UUID v7 生成、JSON 工具
+  modules/
+    questionnaire/          ★ 核心：结构语言、Operation、Repository、Service
+      schema/               Zod 结构定义（AI/后端/前端共用的唯一结构语言）
+      operations/           6 个纯函数：加/改/删/移分组与问题
+      repository/           唯一接触数据库的层
+      service/              唯一业务入口（权限、状态、事务、幂等）
+      controller/           HTTP 门面（含人工编辑器）
+    ai/
+      providers/            LLMProvider 抽象 + DeepSeek 实现
+      orchestrator/         工具调用回合循环（含流式版本）
+      tools/                7 个增量 Tool + 注册表
+      prompts/              System Prompt 与结构摘要
+      service/              会话编排与落库
+    dispatch/ response/ review/   下发、填写、审核
+public/                     工作台前端（无构建链）
+tests/
+  unit/                     纯函数单元测试
+  integration/              直连真实数据库的集成测试
+  fixtures/ai-cases/        D5 AI 评测用例集
+docs/                       设计文档与决策记录
+prisma/schema.prisma        12 张表
+```
+
+## 架构要点
+
+### 分层与依赖方向
+
+```text
+Controller → Service → Operation（纯函数）
+                    ↘ Repository → 数据库
+```
+
+三条硬性约束：
+
+1. **只有 Repository 能碰数据库**。Service 里不出现 `prisma.xxx`。
+2. **Operation 是纯函数**：入参 `(schema, input)` → 新 schema，不访问数据库、
+   不读时钟、不生成随机数（id 由注入的 factory 提供）。因此「AI 改问卷」与
+   「人改问卷」天然共用同一套实现 —— 人工编辑器只用了很少代码就做出来了。
+3. **Service 是唯一业务入口**。权限、状态校验、事务、审计都在这一层，
+   Controller 与 Tool 都只是它的调用方。
+
+### 一次改动的完整链路
+
+```text
+用户说话
+  → Orchestrator 把结构摘要 + 历史 + 用户消息发给模型
+  → 模型返回 tool_calls（如 add_section）
+  → Tool 层把 snake_case 参数转成 camelCase，校验 scene/targetType 是否匹配
+  → Service：校验权限（纵向角色 + 横向归属）与状态（是否已冻结）
+  → Operation：纯函数算出新 schema
+  → Repository：在**一个事务**里写 current_schema、插入 Revision、
+    写审计记录（乐观锁保证并发安全）
+  → 结果回灌给模型，模型继续或收尾
+```
+
+### 四个关键机制
+
+**乐观锁**：`UPDATE ... WHERE current_revision = ?`。并发修改时只有一个成功，
+其余返回 `REVISION_CONFLICT`（409）。已验证：5 个并发请求打到同一 revision，
+结果是 1 成功 + 4 冲突，无丢失更新。
+
+**Revision 快照**：每次结构变更插入一条不可变快照，`revision_no` 连续递增。
+可回看任意一版结构，也是「答案绑定填写时修订号」的基础。
+
+**幂等**：一次 Tool 调用生成一个 `operation_id`，写库前先按它查询是否已执行过。
+已验证：6 个并发请求带同一 `operation_id`，最终只产生 1 个节点、1 条审计、
+revision 只 +1，其余返回幂等重放。唯一约束只作兜底，不依赖它来触发异常。
+
+**横向授权**：不仅校验「你的角色能不能做这类操作」，还校验
+「**这一份数据是不是你的**」。规则见下方权限表。
+
+## 权限模型（决策 D8）
+
+| 角色 | 可做什么 |
+|---|---|
+| `template_admin` | 模板治理；可读任意实例 |
+| `dispatcher` | 建实例、改结构、确认、下发、撤回、扶正；**只能操作自己创建的实例** |
+| `investigator` | 填写答卷；**只能看到/填写被指派给自己的实例** |
+| `reviewer` | 审核提交；审核通过后问卷进入终态 |
+
+实例状态与可编辑性（决策 D1）：
+
+```text
+draft / confirmed  → 结构可改
+dispatched 及以后  → 结构冻结，需先撤回
+completed          → 终态，不可再审、不可回退
+```
+
+## API 一览
+
+所有响应统一为 `{ success, data | error, requestId }`。
+开发态鉴权：请求头 `x-user-id: <用户UUID>`（不带则回退到 `dispatcher1`）。
+
+### 模板
+
+```text
+POST   /api/v1/questionnaire-templates
+GET    /api/v1/questionnaire-templates
+GET    /api/v1/questionnaire-templates/:templateId
+GET    /api/v1/questionnaire-templates/:templateId/versions
+POST   /api/v1/questionnaire-templates/:templateId/versions
+GET    /api/v1/questionnaire-templates/:templateId/versions/:versionId
+POST   /api/v1/questionnaire-templates/:templateId/versions/:versionId/publish
+POST   /api/v1/questionnaire-templates/:templateId/versions/:versionId/disable
+```
+
+### 问卷实例（案件）
+
+```text
+POST   /api/v1/questionnaire-instances
+GET    /api/v1/questionnaire-instances/:instanceId
+GET    /api/v1/questionnaire-instances/:instanceId/revisions
+GET    /api/v1/questionnaire-instances/:instanceId/revisions/:revisionNo
+POST   /api/v1/questionnaire-instances/:instanceId/confirm
+POST   /api/v1/questionnaire-instances/:instanceId/withdraw
+POST   /api/v1/questionnaire-instances/:instanceId/promote
+```
+
+### 人工编辑器（决策 D3 的兜底能力）
+
+与 AI 走完全相同的一套 Service，因此规则一致。写操作都支持
+`expectedRevision` 做乐观锁。
+
+```text
+POST   /api/v1/questionnaire-instances/:id/sections
+PATCH  /api/v1/questionnaire-instances/:id/sections/:sectionId
+POST   /api/v1/questionnaire-instances/:id/questions
+PATCH  /api/v1/questionnaire-instances/:id/questions/:questionId
+PATCH  /api/v1/questionnaire-instances/:id/questions/:questionId/move
+DELETE /api/v1/questionnaire-instances/:id/questions/:questionId
+```
+
+### AI 会话
+
+```text
+POST   /api/v1/ai/conversations
+GET    /api/v1/ai/conversations
+GET    /api/v1/ai/conversations/:id
+GET    /api/v1/ai/conversations/:id/messages
+POST   /api/v1/ai/conversations/:id/messages
+POST   /api/v1/ai/conversations/:id/messages/stream    # SSE 流式
+POST   /api/v1/ai/conversations/:id/commit             # create_template 的唯一保存路径
+POST   /api/v1/ai/conversations/:id/close
+```
+
+SSE 事件协议：
+
+```text
+text_delta            模型文本增量
+tool_call_start       工具开始执行（含 operationId 与参数）
+tool_call_result      工具结果（success / errorCode / 新 revision）
+questionnaire_updated 结构已变更（含新 revision，前端据此重新 GET 结构）
+done                  回合结束（含 truncated 标记）
+error                 流中途失败（调用前就能判定的错误走正常 HTTP 状态码）
+```
+
+### 下发 / 填写 / 审核
+
+```text
+POST   /api/v1/dispatch-tasks
+POST   /api/v1/dispatch-tasks/:id/dispatch
+GET    /api/v1/dispatch-tasks
+GET    /api/v1/questionnaire-instances/:instanceId/response
+PUT    /api/v1/questionnaire-responses/:id/answers
+PUT    /api/v1/questionnaire-responses/:id/answers/:questionId
+POST   /api/v1/questionnaire-responses/:id/submit
+GET    /api/v1/questionnaire-responses/review/pending
+GET    /api/v1/questionnaire-responses/:id/review
+POST   /api/v1/questionnaire-responses/:id/review
+```
+
+### 其他
+
+```text
+GET    /healthz                 健康检查（含数据库连通性）
+GET    /api/v1/me               当前鉴权用户
+GET    /api/v1/dev/users        可用账号列表（**仅非生产环境**）
+GET    /                        工作台前端
+```
+
+## AI 工具集（7 个，全部是增量操作）
+
+| 工具 | 作用 |
+|---|---|
+| `get_questionnaire` | 读取当前结构 |
+| `add_section` | 新增分组 |
+| `add_question` | 新增题目 |
+| `update_section` | 修改分组 |
+| `update_question` | 修改题目 |
+| `remove_question` | 删除题目 |
+| `move_question` | 移动题目（可跨分组） |
+
+**刻意不提供宏工具**（如「生成整份问卷」）。原因：整份重写会让模型每次都重新
+生成所有内容，既慢又容易丢掉用户已有的改动。增量操作配合 `MAX_TOOL_ROUNDS = 8`
+的回合上限，达到上限时返回收尾消息而不是抛错。
+
+场景与目标的匹配由后端强制校验，不依赖 Prompt 约束：
+
+```text
+create_template      + template（草稿版本）    → 允许
+modify_questionnaire + questionnaire_instance → 允许
+其他组合                                       → 拒绝
+```
+
+## 测试
 
 ```bash
-curl http://127.0.0.1:3000/healthz
+pnpm typecheck    # 类型检查
+pnpm test         # 全量测试（需要数据库在跑）
+pnpm test:watch
 ```
 
-### 4.3 常用命令
+当前规模：**242 例测试全部通过**（11 个文件），其中集成测试直连真实数据库。
+
+测试分层的意图：
+
+- `tests/unit/` —— Operation 层纯函数。不碰数据库，跑得极快，覆盖边界条件。
+- `tests/integration/` —— 真实数据库，覆盖事务、乐观锁、幂等、权限、
+  状态机、SSE 事件协议。**不用 mock 数据库**：本项目最容易出问题的恰恰是
+  并发与事务边界，mock 掉就测不出来了。
+
+### 关于本地数据库的坑
+
+`prisma dev` 提供的 Postgres 是个**开发用 shim**，在高并发下不稳定，
+会出现 `ConnectionClosed` / `ECONNRESET` / `bind message supplies N parameters`
+之类的报错，导致集成测试整片失败。此时按顺序恢复：
 
 ```bash
-pnpm dev            # 开发模式（热重载）
-pnpm build          # 编译
-pnpm typecheck      # 类型检查
-pnpm test           # 全部测试（44 单元 + 146 集成）
-
-pnpm db:dev         # 启动本地数据库
-pnpm db:migrate     # 执行迁移
-pnpm db:seed        # 写入测试数据
-pnpm db:studio      # 可视化查看数据
-pnpm db:reset       # 重置数据库（会清空数据）
+pnpm exec prisma dev stop default
+pnpm exec prisma dev start default
 ```
 
-### 4.4 关于集成测试与数据库
+注意 `prisma dev -d` 有时不足以恢复。另外这个 shim 忽略数据库名
+（所有数据都落在 `template1`），因此**不适合多套环境并存**，
+迁内网时请优先换成真实 PostgreSQL。
 
-集成测试跑在**真实的本地数据库**上，`beforeAll/afterEach` 会自行清理它创建的数据。
+## AI 评测（决策 D5）
 
-但有一个例外情况需要注意：
-
-```text
-如果某个测试文件在运行中整体崩溃（例如数据库进程意外退出、
-连接被中断），afterEach 就没有机会执行，会残留：
-  - ai_conversations / ai_messages
-  - questionnaire_templates / questionnaire_template_versions
-  - questionnaire_instances 及其 revisions
-```
-
-判断与恢复：
+把「AI 生成/修改问卷的成功率」变成可量化、可回归的指标，
+取代人工主观验收。用例集在 `tests/fixtures/ai-cases/`（8 条，覆盖生成类与修改类，
+含多轮补充、隐含分组、改措辞、删题、分步增量）。
 
 ```bash
-# 看是否有残留：正常情况下只应有 seed 的 2 个模板 + 1 个实例
-pnpm exec prisma studio
-
-# 彻底恢复干净基线（会清空所有数据并重新 seed）
-pnpm db:reset
+pnpm exec vitest run tests/integration/ai/eval-cases.test.ts
 ```
 
-**另外注意**：本地数据库由 `prisma dev` 提供服务，
-如果你用作业/进程管理器启动它，**终止该作业可能一并带走数据库进程**。
-表现为 `prisma dev ls` 显示 `not_running`，测试报
-`Connection terminated unexpectedly`。此时重新执行：
+四类指标：`Schema 合法性`、`关键点覆盖率`、`工具调用正确率`、`多轮增量保留率`。
 
-```bash
-pnpm exec prisma dev -d
-```
+CI 里用假 Provider 驱动，得到全绿只能证明**评测器与业务链路正确**；
+要得到真实模型的能力指标，需要配置 `AI_API_KEY`，
+把 `tests/integration/ai/harness.ts` 里的 Provider 换成 `DeepSeekProvider` 再跑同一套用例。
 
----
+## 工作台前端
 
-## 5. 开发态鉴权（决策 D11）
+打开 http://127.0.0.1:3000 即可。三个区域：
 
-V1 **不做注册/登录接口**，使用固定测试账号。
+- **顶栏**：切换用户（4 个种子账号）、载入或新建实例
+- **左侧**：与 AI 对话。工具调用会显示成进度条（执行中 / 完成 / 失败），
+  结构一变右侧树自动刷新
+- **右侧**：结构树。标题可直接点开改，题目支持上移 / 下移 / 换组 / 删除，
+  顶部可确认、扶正、撤回
 
-请求时通过请求头指定当前用户：
+之所以用原生 JS 而不是框架：内网环境常常没有外网，
+既不能装依赖也不能用 CDN；服务端直接托管静态文件即可。
 
-```bash
-curl http://127.0.0.1:3000/api/v1/me \
-  -H "x-user-id: <用户ID>"
-```
+## 已知限制
 
-不带该请求头时，回退到 `dispatcher1`，方便直接调试。
+诚实列出，避免误判完成度：
 
-测试账号（ID 由用户名确定性派生，重跑 seed 不变；实际值见 `pnpm db:seed` 输出）：
+- **未接真实模型做端到端验证**。链路每一段都独立验证过，
+  但「真实 DeepSeek 返回的 `tool_calls` 能被正确解析并驱动业务」
+  只有配上有效 `AI_API_KEY` 才能最终确认。
+- **`AI_MODEL` 默认值未与上游核对过**（没有 Key），拼写若有误改 `.env` 即可。
+- **本地数据库不适合压测**，见上文 `prisma dev` 的坑。
+- 前端是**最小可用**版本，没有回答填写界面与审核界面，
+  这两步目前只能走 API。
+- 前端不做乐观更新：写操作失败后会重新拉取结构，
+  因此界面始终与数据库一致，但代价是多一次请求。
+- `conversationId` 目前每次载入实例都新建，未复用未关闭的历史会话。
 
-| 用户名 | 角色 | 说明 |
-| --- | --- | --- |
-| `admin` | `template_admin` | 模板管理 |
-| `dispatcher1` | `dispatcher` | 问卷创建 / 下发 / 撤回 |
-| `investigator1` | `investigator` | 问卷填写 |
-| `reviewer1` | `reviewer` | 问卷审核 |
+## 文档
 
-> **接入真实鉴权时**：只需替换 `src/shared/auth/auth.middleware.ts`，
-> 业务层与权限校验代码零改动。
->
-> 生产环境若没有真实鉴权实现，服务会**拒绝启动**，而不是静默放行任何人。
+`docs/` 下是设计与决策记录，**出现冲突时以 `docs/09-review-and-decisions.md`
+（决策日志 D1–D13）为准**：
 
----
-
-## 6. 目录结构
-
-```text
-├── docs/                    设计文档集（权威依据）
-│   ├── 00-Requirements.md   原始需求
-│   ├── 01-rpd.md           产品需求
-│   ├── 02-architecture.md   系统架构
-│   ├── 03-...tool_calling   问卷 Schema + 7 个增量 Tool 契约
-│   ├── 04-database_design.md 数据库设计
-│   ├── 05-api_design.md     API 设计
-│   ├── 06-proj_init.md      项目初始化
-│   ├── 08-ai_agent...       AI Agent / Prompt / Tool Calling
-│   └── 09-review-and-decisions.md  评审结论与决策记录（D1~D13）
-│
-├── prisma/
-│   ├── schema.prisma        12 张表的模型定义
-│   ├── migrations/          迁移历史
-│   └── seed.ts              测试数据
-│
-├── src/
-│   ├── main.ts              启动入口
-│   ├── app/app.ts           Express 装配
-│   ├── config/env.ts        环境变量统一读取
-│   ├── database/
-│   │   ├── client.ts        Prisma 客户端（含 pg adapter）
-│   │   └── transaction.ts   事务辅助
-│   ├── modules/
-│   │   ├── questionnaire/                    业务核心
-│   │   │   ├── schema/questionnaire.schema.ts   问卷结构权威定义（Zod）
-│   │   │   ├── operations/  纯函数式结构变换（AI 与人工编辑共用）
-│   │   │   │   ├── add-section.ts / add-question.ts
-│   │   │   │   ├── update-section.ts / update-question.ts
-│   │   │   │   ├── remove-question.ts / move-question.ts
-│   │   │   │   ├── helpers.ts（order 重算、选项构造、最终校验）
-│   │   │   │   └── id-factory.ts（ID 由后端生成，测试可注入）
-│   │   │   ├── repository/questionnaire.repository.ts
-│   │   │   │   （乐观锁更新、Revision 快照、审计日志、幂等查询）
-│   │   │   └── service/questionnaire.service.ts
-│   │   │       （权限 + 状态校验 + 事务 + 幂等，REST 与 AI Tool 共用）
-│   │   │
-│   │   └── ai/                               智能能力入口
-│   │       ├── tools/                        7 个增量 Tool
-│   │       │   ├── questionnaire.tools.ts    6 个写入 + 1 个读取
-│   │       │   ├── tool-registry.ts          注册表、runTool、JSON Schema 生成
-│   │       │   ├── shared.ts                 参数片段与 target_id 一致性校验
-│   │       │   └── types.ts                  ToolContext / ToolResult 契约
-│   │       ├── providers/                    LLM 抽象与实现（决策 D13）
-│   │       │   ├── llm-provider.ts           中立接口，无厂商概念
-│   │       │   └── deepseek.provider.ts      DeepSeek（OpenAI 兼容）
-│   │       ├── prompts/prompt-builder.ts     分层 Prompt 构建
-│   │       └── orchestrator/ai.orchestrator.ts  Tool 调用循环
-│   └── shared/
-│       ├── errors/          业务错误类型与错误码（含 D1 锁定码）
-│       ├── auth/            鉴权与当前用户上下文
-│       └── utils/           id（UUID v7）、json 等
-│
-├── tests/
-│   ├── fixtures/            测试夹具
-│   ├── unit/                44 个单元测试（Operation 层，无数据库）
-│   └── integration/         146 个集成测试（真实数据库）
-│       ├── questionnaire/   Service：冻结、幂等、乐观锁、撤回
-│       ├── ai/              Tool、Orchestrator（假 Provider）、Provider 线格式
-│       └── api/             HTTP 端点：模板/实例/AI/下发/填写/审核
-│       ├── questionnaire/   Service：冻结、幂等、乐观锁、撤回
-│       └── ai/              Tool 与 Orchestrator（假 Provider 驱动）
-│
-├── prisma7.config.ts        Prisma 7 配置（datasource URL 在这里）
-└── pnpm-workspace.yaml      pnpm 11 构建脚本放行（关键，勿删）
-```
-
----
-
-## 6.1 代码分层与依赖方向
-
-```text
-                  HTTP                        AI Tool
-                   │                             │
-                   ▼                             ▼
-              Controller                    Tool 适配层
-                   │                             │
-                   └──────────┬──────────────────┘
-                              ▼
-                   QuestionnaireService        ← 唯一业务入口
-                              │
-                   ┌──────────┴──────────┐
-                   ▼                     ▼
-              Operation 层           Repository
-            （纯函数，可单测）      （乐观锁 / Revision / 审计）
-                   │                     │
-                   ▼                     ▼
-            QuestionnaireSchema      PostgreSQL
-```
-
-**AI 侧的额外一层：**
-
-```text
-用户自然语言
-     │
-     ▼
-AI Orchestrator  ── 构建分层 Prompt + 维护消息历史
-     │                 （MAX_TOOL_ROUNDS = 8，触顶收尾不报错）
-     ▼
-LLMProvider 抽象 ── DeepSeek（OpenAI 兼容）；迁内网只需换实现
-     │  Tool Call
-     ▼
-runTool  ── 查表 → Zod 校验参数 → Tool.execute
-     │        每次调用生成独立 operation_id（决策 D9）
-     ▼
-Tool 适配层  ── snake_case 参数 → camelCase Operation
-     │         + target_id 与会话一致性校验
-     ▼
-QuestionnaireService（同上，权限与状态由后端强制）
-```
-
-**关键约束：**
-
-- `Operation` 层是纯函数：入参 `(schema, input)`，返回新 schema，
-  不碰数据库、不碰 HTTP、不依赖 AI —— 因此可被单元测试完整覆盖。
-- `Service` 是唯一业务入口：REST 与 AI Tool 都调用它，不存在两套逻辑。
-- 只有 `Repository` 能碰数据库。
-- `LLMProvider` 接口中立，不含任何厂商专有概念（决策 D13）。
-- 所有结构修改在返回前都会经过 `questionnaireSchema.parse()`，
-  因此**不可能有非法结构落库**。
-- **Prompt 只承担行为约束，权限与状态校验一律在代码层** ——
-  模型没有绕过权限的可能。
-
----
-
-## 7. 设计文档的阅读顺序
-
-```text
-01 RPD（要做什么）
-  ↓
-02 架构（怎么分层）
-  ↓
-03 Schema + Tool（问卷长什么样、AI 能怎么改）
-  ↓
-04 数据库（怎么存）
-  ↓
-05 API（怎么调）
-  ↓
-06 项目初始化（怎么落地）
-  ↓
-08 AI Agent（模型侧怎么工作）
-  ↓
-09 评审结论与决策记录（所有已拍板的决策，冲突时以它为准）
-```
-
-**文档冲突时以 `09-review-and-decisions.md` 为准。**
-
----
-
-## 8. 几条关键业务规则
-
-### 8.1 下发后结构冻结（决策 D1）
-
-```text
-draft / confirmed      → 允许修改结构
-已下发（dispatched 之后）→ 禁止修改，必须先撤回
-```
-
-调查员负责上门核查，具体核查哪些内容由下发人员决定，
-因此「下发」代表核查内容已布置完毕。
-
-需要改动时走：**撤回 → 修改 → 二次下发**。
-
-### 8.2 临时改动可以扶正（决策 D2）
-
-同类案件反复出现同样的临时改动，说明标准模板缺失。
-实例上提供「保存为新版本」，生成模板**草稿版本**，需走正常发布流程。
-
-### 8.3 AI 只通过 7 个增量工具改问卷
-
-```text
-get_questionnaire   add_section    add_question
-update_section      update_question
-remove_question     move_question
-```
-
-不存在「一次生成整份问卷」的宏工具 ——
-那会导致模型遗漏内容、无法精确审计、破坏幂等。
-「生成整份问卷」在 Prompt 层由模型拆解为多次增量调用实现。
-
-### 8.4 一次 Tool 调用 = 一个 operation_id = 一次 Revision（决策 D9）
-
-因此一条用户消息可能产生多次 Revision，这是设计目标，不是异常。
-
----
-
-## 9. 已知注意事项
-
-1. **`pnpm-workspace.yaml` 不能删**：pnpm 11 默认拦截 Prisma / esbuild 的构建脚本，
-   删掉它安装会直接失败。
-2. **`DATABASE_URL` 必须用直连 TCP 地址**：`prisma+postgres://` 代理地址无法用于迁移。
-3. **`prisma dev` 的端口是随机的**：换环境后需重新 `pnpm exec prisma dev ls` 更新 `.env`。
-4. **`.env` 不提交 Git**：真实密钥不入库，模板见 `.env.example`。
-5. **`generated/` 不提交 Git**：由 `pnpm exec prisma generate` 生成。
+| 文件 | 内容 |
+|---|---|
+| `00-Requirements.md` | 原始需求 |
+| `01-rpd.md` | 需求与产品定义 |
+| `02-architecture.md` | 架构与分层 |
+| `03-questionnaire_schema_ai_tool_calling .md` | 结构语言与 AI 工具调用契约（含第 36.0 节的场景矩阵） |
+| `04-database_design.md` | 数据模型 |
+| `05-api_design.md` | API 设计（含状态机与撤回的数据处理） |
+| `06-proj_init.md` | 初始化与实施进度（含环境踩坑记录） |
+| `08-ai_agent_prompt_tool_calling.md` | AI 编排、Prompt 与流式协议 |
+| `09-review-and-decisions.md` | **决策日志 D1–D13，冲突时以它为准** |
