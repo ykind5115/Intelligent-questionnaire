@@ -29,3 +29,8 @@ tmp-audit-*/
 tmp-verify/
 tmp/
 
+
+# 根目录下的临时脚本与文件
+tmp-*
+tmp-chrome-profile/
+

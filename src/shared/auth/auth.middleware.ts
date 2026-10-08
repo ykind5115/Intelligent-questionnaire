@@ -75,6 +75,16 @@ async function loadUserByUsername(
  *   3. 注入 req.currentUser
  *
  * 若未带请求头，回退到 dispatcher1，方便调试。
+ *
+ * x-user-id 的取值（**这一点很容易踩坑**）：
+ *   - 正常应当是用户 UUID；
+ *   - 未带该头 → 回退到 dispatcher1；
+ *   - 带了该头但值非法（例如写了用户名，或前端误发了字面量字符串 "null"）
+ *     → **401**，不静默回退，否则越权会变得难以发现。
+ *
+ * 非生产环境额外接受**用户名**：用 curl 手工调试时写
+ * `x-user-id: dispatcher1` 也能用，不必先去查 UUID。
+ * 生产环境只认 UUID（用户名可枚举，回退会降低攻击成本）。
  */
 export function devAuthMiddleware() {
   return async (
@@ -83,18 +93,28 @@ export function devAuthMiddleware() {
     next: NextFunction
   ): Promise<void> => {
     try {
-      const raw = req.header(USER_ID_HEADER);
+      const raw = req.header(USER_ID_HEADER)?.trim();
 
       let user: CurrentUser | null = null;
 
       if (raw) {
         user = await loadUserById(raw);
+
+        if (!user && !isProduction) {
+          user = await loadUserByUsername(raw);
+        }
+
         if (!user) {
           res.status(401).json({
             success: false,
             error: {
               code: "UNAUTHORIZED",
-              message: `未知或已停用的用户 id：${raw}`,
+              message:
+                `未知或已停用的用户 id：${raw}` +
+                (isProduction
+                  ? ""
+                  : "（开发态可传 UUID 或用户名，例如 dispatcher1；" +
+                    "不要把 null/undefined 直接拼进请求头）"),
             },
           });
           return;

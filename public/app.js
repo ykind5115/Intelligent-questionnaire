@@ -48,11 +48,19 @@ function toast(message, isError = false) {
 /**
  * 统一的 API 调用。
  *
- * 关键：所有请求都带 x-user-id（开发态鉴权，决策 D11），
- * 后端据此做纵向 + 横向授权，前端不做任何权限假设。
+ * 关键：带 x-user-id（开发态鉴权，决策 D11），后端据此做纵向 + 横向授权，
+ * 前端不做任何权限假设。
+ *
+ * 注意：**只在选定了用户之后**才带这个头。页面加载时需要先取账号列表，
+ * 那时还没有用户；若无条件带上，会发出字面量字符串 "null" 而被 401 拒绝。
  */
 async function api(method, path, body) {
-  const headers = { "x-user-id": state.userId };
+  const headers = {};
+  // 注意：只在真的选定了用户之后才带 x-user-id。
+  // 之前是无条件带上，页面刚加载时 state.userId 还是 null，
+  // 于是发出去的是**字面量字符串 "null"**，后端按 UUID 校验直接 401，
+  // 导致账号列表取不到、用户下拉永远是空的（看起来像「登录不上」）。
+  if (state.userId) headers["x-user-id"] = state.userId;
   if (body !== undefined) headers["content-type"] = "application/json";
 
   const res = await fetch(path, {
@@ -558,7 +566,8 @@ async function sendMessage(content) {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-user-id": state.userId,
+          // 与 api() 同理：没有用户时不要发字面量 "null"
+          ...(state.userId ? { "x-user-id": state.userId } : {}),
         },
         body: JSON.stringify({ content }),
       }
