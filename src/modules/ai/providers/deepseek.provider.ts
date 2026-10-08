@@ -1,9 +1,18 @@
 /**
  * DeepSeek Provider（OpenAI 兼容协议）。
  *
- * 依据决策 D12：V1 使用 DeepSeek `deepseek-v41-flash`。
+ * 依据决策 D12：V1 使用 DeepSeek 的 OpenAI 兼容接口。
+ *   （决策记录里写的是 `deepseek-v41-flash`；该模型已退役，
+ *    官方现在接受 `deepseek-flash`（默认）与 `deepseek-v4-pro`，
+ *    旧的 `deepseek-v4-flash` 名字仍被接受但会由新模型承接。
+ *    本 Provider 不关心具体模型名 —— 它只把 env.AI_MODEL 原样传下去，
+ *    因此换模型不需要改代码。）
+ *
  * 依据决策 D13：所有连接参数来自环境变量，
  *   迁内网时只改 AI_BASE_URL / AI_API_KEY / AI_MODEL，本文件不动。
+ *
+ * 注意 base URL 必须是 **OpenAI 兼容**的根地址；
+ *   填成 Anthropic 兼容端点（/anthropic）会 404，见 buildChatCompletionsUrl 的说明。
  */
 import { env, isProduction } from "../../../config/env.js";
 import {
@@ -29,6 +38,38 @@ import {
  *      避免静默访问公网服务。
  */
 const DEV_DEFAULT_BASE_URL = "https://api.deepseek.com";
+
+/**
+ * 组装 chat completions 的完整 URL。
+ *
+ * 兼容三种写法，避免「少写或多写 /v1」这类常见配置错误：
+ *   https://api.deepseek.com      → https://api.deepseek.com/chat/completions
+ *   https://api.deepseek.com/v1   → https://api.deepseek.com/chat/completions
+ *   http://localhost:8000/v1      → http://localhost:8000/chat/completions
+ *   http://localhost:8000         → http://localhost:8000/chat/completions
+ *
+ * 迁内网时自研服务多半是 OpenAI 兼容的 `/v1/...`，因此不能简单粗暴地
+ * 一律追加 `/chat/completions`（会变成 `/v1/chat/completions` 缺失或重复）。
+ */
+function buildChatCompletionsUrl(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+  return `${base}/chat/completions`;
+}
+
+/**
+ * 识别「填成了 Anthropic 兼容端点」这一常见配置错误。
+ *
+ * DeepSeek 同时提供两套兼容协议：
+ *   OpenAI  兼容：https://api.deepseek.com            （本项目使用）
+ *   Anthropic 兼容：https://api.deepseek.com/anthropic （路径为 /v1/messages）
+ *
+ * 若把 Anthropic 端点填进 AI_BASE_URL，请求会打到
+ * /anthropic/chat/completions —— 该路径不存在，返回 **404 且响应体为空**，
+ * 非常难排查（本次就是这样踩到的）。因此这里提前给出明确提示。
+ */
+function looksLikeAnthropicEndpoint(baseUrl: string): boolean {
+  return /\/anthropic\/?$/.test(baseUrl.trim());
+}
 
 /** 与 OpenAI 兼容协议的线格式（仅限本文件内部使用） */
 interface WireMessage {
@@ -123,6 +164,22 @@ export class DeepSeekProvider implements LLMProvider {
     }
 
     this.baseUrl = (configured || DEV_DEFAULT_BASE_URL).replace(/\/+$/, "");
+
+    // 配置写错时给出**可定位**的提示，而不是等到一个空 body 的 404。
+    if (looksLikeAnthropicEndpoint(this.baseUrl)) {
+      // 不直接抛错：也许是内网某个恰好以 /anthropic 结尾的 OpenAI 兼容网关。
+      // 但必须让人看到，否则排查成本极高。
+      console.warn(
+        [
+          "[DeepSeekProvider] AI_BASE_URL 看起来是 Anthropic 兼容端点：",
+          this.baseUrl,
+          "本项目走 OpenAI 兼容协议，会请求",
+          buildChatCompletionsUrl(this.baseUrl),
+          "——该路径通常不存在（404 且响应体为空）。",
+          "若使用 DeepSeek 官方服务，请改为 https://api.deepseek.com",
+        ].join(" ")
+      );
+    }
     this.apiKey = options.apiKey ?? env.AI_API_KEY;
     this.model = options.model ?? env.AI_MODEL;
     this.timeoutMs = options.timeoutMs ?? 120_000;
@@ -175,7 +232,7 @@ export class DeepSeekProvider implements LLMProvider {
 
     let res: Response;
     try {
-      res = await fetch(`${this.baseUrl}/chat/completions`, {
+      res = await fetch(buildChatCompletionsUrl(this.baseUrl), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -147,6 +147,94 @@ function makeProvider(baseUrl: string, apiKey = "test-key"): DeepSeekProvider {
 }
 
 // ============================================================
+// base URL 归一化（来自一次真实的 404 故障）
+//
+// 现象：AI_BASE_URL 填成了 Anthropic 兼容端点
+//   https://api.deepseek.com/anthropic
+// 而本 provider 走 OpenAI 协议，会拼成
+//   /anthropic/chat/completions  → 404 且响应体为空，极难排查。
+//
+// 这里把几种常见写法固定下来，避免再退化。
+// ============================================================
+
+describe("DeepSeekProvider - base URL 归一化", () => {
+  const cases: { name: string; suffix: string; expectPath: string }[] = [
+    { name: "裸域名", suffix: "", expectPath: "/chat/completions" },
+    { name: "带 /v1", suffix: "/v1", expectPath: "/chat/completions" },
+    { name: "带尾斜杠", suffix: "/", expectPath: "/chat/completions" },
+    { name: "带 /v1/", suffix: "/v1/", expectPath: "/chat/completions" },
+  ];
+
+  for (const c of cases) {
+    it(`${c.name} → 请求 ${c.expectPath}`, async () => {
+      const { baseUrl, endpoint } = await startEndpoint({
+        json: {
+          model: "deepseek-flash",
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        },
+      });
+
+      // mock 端点返回的是 http://127.0.0.1:port
+      await makeProvider(baseUrl + c.suffix).chat([
+        { role: "user", content: "hi" },
+      ]);
+
+      expect(endpoint.requests[0]?.url).toBe(c.expectPath);
+    });
+  }
+
+  it("填成 Anthropic 端点时给出明确警告（而不是等一个空 body 的 404）", async () => {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+
+    try {
+      // 只构造，不发请求
+      new DeepSeekProvider({
+        baseUrl: "https://api.deepseek.com/anthropic",
+        apiKey: "test-key",
+        model: "deepseek-flash",
+      });
+    } finally {
+      console.warn = original;
+    }
+
+    const joined = warnings.join("\n");
+    expect(joined).toContain("Anthropic");
+    // 提示里要给出可执行的修法
+    expect(joined).toContain("https://api.deepseek.com");
+  });
+
+  it("正常的 OpenAI 端点不会触发警告", async () => {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+
+    try {
+      const { baseUrl } = await startEndpoint({
+        json: {
+          model: "deepseek-flash",
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        },
+      });
+      new DeepSeekProvider({
+        baseUrl,
+        apiKey: "test-key",
+        model: "deepseek-flash",
+      });
+    } finally {
+      console.warn = original;
+    }
+
+    expect(warnings.join("\n")).not.toContain("Anthropic");
+  });
+});
+
+// ============================================================
 // 非流式
 // ============================================================
 

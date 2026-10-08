@@ -17,9 +17,14 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL 未配置"),
 
   // 决策 D12 / D13：模型服务三项全部可配，迁内网只改这里
+  //
+  // AI_BASE_URL 必须是 OpenAI 兼容的根地址（会自行拼 /chat/completions）。
+  // 不要填 DeepSeek 的 Anthropic 兼容端点 https://api.deepseek.com/anthropic
+  // —— 那是 /v1/messages 协议，会得到 404（响应体为空，很难查）。
   AI_BASE_URL: z.string().default(""),
   AI_API_KEY: z.string().default(""),
-  AI_MODEL: z.string().default("deepseek-v41-flash"),
+  // 可选：deepseek-flash（默认）、deepseek-v4-pro
+  AI_MODEL: z.string().default("deepseek-flash"),
 });
 
 const parsed = envSchema.safeParse(process.env);

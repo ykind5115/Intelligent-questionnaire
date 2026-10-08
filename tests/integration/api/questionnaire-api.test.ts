@@ -85,7 +85,10 @@ describe("基础中间件", () => {
     expect(res.status).toBe(200);
     const data = expectData<{ db: string; model: string }>(res);
     expect(data.db).toBe("up");
-    expect(data.model).toBe("deepseek-v41-flash");
+    // model 直接来自 env.AI_MODEL（本机 .env 里是 deepseek-flash）。
+    // 不要硬编码具体模型名：它随配置变化，且默认值会随上游调整。
+    expect(typeof data.model).toBe("string");
+    expect(data.model.length).toBeGreaterThan(0);
   });
 
   it("GET /api/v1/me 返回当前用户与角色", async () => {

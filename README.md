@@ -47,7 +47,7 @@ AI 辅助的问卷生成与动态编排系统。用自然语言描述调查需�
 | 人工编辑器（决策 D3 兜底） | ✅ |
 | AI 评测用例集（决策 D5，含四类量化指标） | ✅ |
 | 测试：242 例全绿（11 个文件，含真实数据库集成测试） | ✅ |
-| 真实模型端到端验证（需 `AI_API_KEY`） | ⬜ 待你提供 Key |
+| 真实模型端到端验证（`deepseek-flash`） | ✅ 对话 / 流式 / 工具调用均通过（见「已知限制」） |
 | 前端填写界面与审核界面 | ⬜ 目前走 API |
 
 ## 快速开始
@@ -145,9 +145,22 @@ pnpm db:seed
 | `NODE_ENV` | `development` | `production` 时强制要求真实鉴权与 `AI_BASE_URL` |
 | `PORT` | `3000` | |
 | `DATABASE_URL` | 无（必填） | `prisma dev` 会打印这个值 |
-| `AI_BASE_URL` | 空 | **生产环境必填**（决策 D13） |
+| `AI_BASE_URL` | 空 | **生产环境必填**（决策 D13）。必须是 **OpenAI 兼容**根地址，见下方注意事项 |
 | `AI_API_KEY` | 空 | 没有它就只能用假 Provider 跑测试 |
-| `AI_MODEL` | `deepseek-v41-flash` | 决策 D12 |
+| `AI_MODEL` | `deepseek-flash` | 决策 D12；也可用 `deepseek-v4-pro` |
+
+> ⚠️ **`AI_BASE_URL` 不要填 Anthropic 兼容端点。**
+> DeepSeek 同时提供两套协议：
+>
+> ```text
+> OpenAI    兼容：https://api.deepseek.com              ← 本项目用这个
+> Anthropic 兼容：https://api.deepseek.com/anthropic     （路径是 /v1/messages）
+> ```
+>
+> 填成 Anthropic 端点会请求 `/anthropic/chat/completions`，
+> 该路径不存在 → **404 且响应体为空**，非常难排查。
+> Provider 现在会在启动时对这种配置发出明确警告。
+> 另外 `/v1` 前缀写不写都可以（会自动归一化）。
 
 迁内网只需改这三项 AI 配置，代码无需改动（Provider 层是厂商中立的）。
 
@@ -461,16 +474,29 @@ CI 里用假 Provider 驱动，得到全绿只能证明**评测器与业务链�
 
 诚实列出，避免误判完成度：
 
-- **未接真实模型做端到端验证**。链路每一段都独立验证过，
-  但「真实 DeepSeek 返回的 `tool_calls` 能被正确解析并驱动业务」
-  只有配上有效 `AI_API_KEY` 才能最终确认。
-- **`AI_MODEL` 默认值未与上游核对过**（没有 Key），拼写若有误改 `.env` 即可。
 - **本地数据库不适合压测**，见上文 `prisma dev` 的坑。
 - 前端是**最小可用**版本，没有回答填写界面与审核界面，
   这两步目前只能走 API。
 - 前端不做乐观更新：写操作失败后会重新拉取结构，
   因此界面始终与数据库一致，但代价是多一次请求。
 - `conversationId` 目前每次载入实例都新建，未复用未关闭的历史会话。
+- 真实模型只用少量请求做过验证（见下方「已验证」），
+  **没有跑完整的 8 条 D5 评测用例**，因此还没有量化的成功率数字。
+
+### 真实模型验证情况
+
+已用真实 DeepSeek 服务验证（`deepseek-flash`）：
+
+```text
+非流式对话    ✅ 正常返回
+流式对话      ✅ 收到 text_delta 与 done，文本正确拼接
+工具调用      ✅ 模型返回 add_section，参数合法
+               执行后结构真的落库，revision 1 → 2
+```
+
+也就是说「模型 → Tool → Service → 数据库」这条链路已经打通。
+若要得到 D5 定义的量化指标，把 `tests/integration/ai/harness.ts`
+里的 Provider 换成 `DeepSeekProvider` 跑那 8 条用例即可。
 
 ### 几条容易踩的环境注意事项
 
