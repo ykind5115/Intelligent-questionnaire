@@ -733,6 +733,12 @@ export const questionnaireService = {
       // ---- 状态校验（决策 D1）----
       assertInstanceWritable(instance);
 
+      // ---- 横向授权：不能改别人的问卷 ----
+      // getInstance 一直有这个校验，但写路径此前漏了：
+      // 只要拿到 instanceId，任何 dispatcher 都能改他人案件的结构。
+      // 这里必须补上，且要在写入之前。
+      await resolveInstanceAccess(instance, ctx);
+
       // ---- 版本校验 ----
       const expectedRevision =
         options.expectedRevision ?? instance.currentRevision;

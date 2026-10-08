@@ -23,6 +23,7 @@ import {
   sendCreated,
   sendSuccess,
 } from "../../../app/api-response.js";
+import { isOperationError } from "../../../shared/errors/index.js";
 import { asyncHandler } from "../../../app/error-handler.js";
 import { validate } from "../../../app/validate.js";
 import { aiContextOf } from "../../../app/request-context.js";
@@ -302,6 +303,78 @@ export function createAiRouter(): Router {
       );
 
       sendCreated(req, res, result);
+    })
+  );
+
+  // ---- 流式发送消息（SSE） ----
+  //
+  // 依据 05 文档第 10.4 节与 08 文档第 52 节：
+  //   前端需要实时看到「AI 在做什么」，但不应看到原始 JSON。
+  // 事件类型：text_delta / tool_call_start / tool_call_result /
+  //          questionnaire_updated / done / error
+  router.post(
+    "/conversations/:id/messages/stream",
+    validate({ params: conversationParams, body: sendMessageBody }),
+    asyncHandler(async (req: Request, res: Response) => {
+      const { id } = req.params as z.infer<typeof conversationParams>;
+      const body = req.body as SendMessageBody;
+      const ctx = aiContextOf(req);
+
+      const send = (event: string, data: unknown): void => {
+        res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      };
+
+      // ---- 校验与用户消息落库必须在写 SSE 头之前完成 ----
+      // 否则状态码已经固定为 200，前端拿不到 422/403/404，
+      // 「内容为空」「会话不存在」「无权访问」这类调用前就能判定的错误
+      // 会退化成流里的 error 事件，调用方很难处理。
+      let prepared;
+      try {
+        prepared = await aiConversationService.prepareStreamMessage({
+          conversationId: id,
+          content: body.content,
+          ctx,
+        });
+      } catch (error) {
+        const code = isOperationError(error) ? error.code : "SYSTEM_ERROR";
+        const status = isOperationError(error) ? error.httpStatus : 500;
+        res.status(status).json({
+          success: false,
+          error: {
+            code,
+            message: error instanceof Error ? error.message : String(error),
+          },
+          requestId: req.header("x-request-id") ?? null,
+        });
+        return;
+      }
+
+      // ---- 校验通过，开始推流 ----
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      // 关闭 Nginx 等反代的缓冲，否则事件会被攒着一起发
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders?.();
+
+      try {
+        for await (const evt of aiConversationService.runStreamTurn({
+          prepared,
+          ctx,
+          ...(providerOf(req) ? { provider: providerOf(req)! } : {}),
+        })) {
+          send(evt.type, evt);
+        }
+      } catch (error) {
+        // 流已开始，无法再用 HTTP 状态码表达失败，
+        // 因此以 error 事件传达（前端需处理这种「半途失败」）
+        const code = isOperationError(error) ? error.code : "SYSTEM_ERROR";
+        const message = error instanceof Error ? error.message : String(error);
+        send("error", { code, message });
+      } finally {
+        res.end();
+      }
     })
   );
 

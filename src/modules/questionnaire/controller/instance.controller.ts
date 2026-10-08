@@ -12,6 +12,7 @@ import { asyncHandler } from "../../../app/error-handler.js";
 import { validate } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireService } from "../service/questionnaire.service.js";
+import { createEditorRouter } from "./editor.controller.js";
 
 // ============================================================
 // 请求 Schema
@@ -205,5 +206,25 @@ export function createInstanceRouter(): Router {
     })
   );
 
+  return router;
+}
+
+/**
+ * 实例路由（含人工编辑器子路由）。
+ *
+ * 人工编辑器（决策 D3）挂在同一前缀下，路径形如：
+ *   POST   /questionnaire-instances/{id}/sections
+ *   PATCH  /questionnaire-instances/{id}/sections/{sectionId}
+ *   POST   /questionnaire-instances/{id}/questions
+ *   PATCH  /questionnaire-instances/{id}/questions/{questionId}
+ *   PATCH  /questionnaire-instances/{id}/questions/{questionId}/move
+ *   DELETE /questionnaire-instances/{id}/questions/{questionId}
+ *
+ * 拆成两个文件是为了让「实例生命周期」与「结构编辑」各自清晰；
+ * 它们共用同一套 Service，因此行为与 AI Tool 完全一致。
+ */
+export function createInstanceRouterWithEditor(): Router {
+  const router = createInstanceRouter();
+  router.use("/", createEditorRouter());
   return router;
 }

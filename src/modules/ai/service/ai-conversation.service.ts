@@ -22,7 +22,7 @@ import {
   OperationError,
   validationError,
 } from "../../../shared/errors/index.js";
-import { runTurn, type ToolTrace } from "../orchestrator/ai.orchestrator.js";
+import { runTurn, runTurnStream, type ToolTrace } from "../orchestrator/ai.orchestrator.js";
 import { summarizeQuestionnaire } from "../prompts/prompt-builder.js";
 import {
   aiConversationRepository,
@@ -136,6 +136,62 @@ export function toChatHistory(rows: AiMessageRow[]): ChatMessage[] {
 
   return history;
 }
+
+/**
+ * 流式发送的准备结果（prepareStreamMessage 的返回值）。
+ *
+ * 单独定义是为了让「准备」与「跑回合」两段职责有清晰的交接面：
+ *   准备阶段可以被正常 HTTP 错误中断；
+ *   跑回合阶段只推事件，不再抛业务错误。
+ */
+export interface PreparedStreamMessage {
+  conversationId: string;
+  content: string;
+  targetId: string;
+  targetType: string;
+  scene: string;
+  history: ChatMessage[];
+  questionnaireContext: string;
+  revisionBefore: number | undefined;
+}
+
+/**
+ * 流式回合事件（SSE 推送出去的内容）。
+ *
+ * 依据 05 文档第 10.4 节与 08 文档第 52 节：
+ *   前端要能看到「AI 正在做什么」，但不应看到原始 JSON。
+ * 事件类型：text_delta / tool_call_start / tool_call_result /
+ *          questionnaire_updated / done / error（error 由 Controller 补）
+ */
+export type StreamTurnEvent =
+  | { type: "text_delta"; text: string }
+  | {
+      type: "tool_call_start";
+      toolName: string;
+      operationId: string;
+      arguments: unknown;
+    }
+  | {
+      type: "tool_call_result";
+      toolName: string;
+      operationId: string;
+      success: boolean;
+      errorCode?: string;
+      /** 结构类操作返回的新 revision，前端据此决定是否刷新结构树 */
+      revision?: number;
+    }
+  | {
+      type: "questionnaire_updated";
+      questionnaireId: string;
+      revision: number;
+    }
+  | {
+      type: "done";
+      content: string;
+      truncated: boolean;
+      model: string;
+      revision?: number;
+    };
 
 export const aiConversationService = {
   // ----------------------------------------------------------
@@ -451,6 +507,266 @@ export const aiConversationService = {
       model: turnResult.model,
     };
   },
+
+  /**
+   * 流式发送前的准备（**必须在写 SSE 响应头之前调用**）。
+   *
+   * 为什么单独拆出来：
+   *   SSE 一旦写下响应头，HTTP 状态码就固定在 200，
+   *   此后再校验失败只能靠 error 事件表达，前端拿不到 422/403/404。
+   *   而「内容为空」「会话不存在」「无权访问」这些恰恰是**调用前就能判定**的错误，
+   *   应该走正常 HTTP 状态码。
+   *   因此校验与「落库用户消息」都在这里完成，
+   *   之后 runStreamTurn 只负责跑模型与推事件。
+   */
+  async prepareStreamMessage(input: SendMessageInput): Promise<PreparedStreamMessage> {
+    const content = input.content?.trim();
+    if (!content) {
+      throw validationError("消息内容不能为空", { path: "content" });
+    }
+
+    const conversation = await this.getConversation(
+      input.conversationId,
+      input.ctx
+    );
+
+    if (!conversation.targetId || !conversation.targetType) {
+      throw new OperationError(
+        ErrorCode.INVALID_OPERATION,
+        "该会话没有绑定操作目标，无法执行修改"
+      );
+    }
+
+    let questionnaireContext: string;
+    let revisionBefore: number | undefined;
+
+    if (conversation.targetType === "questionnaire_instance") {
+      const instance = await questionnaireService.getInstance(
+        conversation.targetId,
+        { userId: input.ctx.userId, roles: input.ctx.roles }
+      );
+
+      if (instance.status !== "draft" && instance.status !== "confirmed") {
+        throw new OperationError(
+          ErrorCode.QUESTIONNAIRE_LOCKED,
+          "问卷已下发，请先撤回后再修改",
+          { path: "status", status: instance.status }
+        );
+      }
+
+      questionnaireContext = summarizeQuestionnaire(instance.currentSchema);
+      revisionBefore = instance.currentRevision;
+    } else {
+      const version = await questionnaireRepository.findTemplateVersionById(
+        conversation.targetId
+      );
+      if (!version) {
+        throw new OperationError(
+          ErrorCode.TEMPLATE_VERSION_NOT_FOUND,
+          `模板版本不存在：${conversation.targetId}`
+        );
+      }
+      questionnaireContext = summarizeQuestionnaire(version.schema);
+    }
+
+    // ---- 落库用户消息（校验已全部通过，不会再失败）----
+    await aiConversationRepository.appendMessage({
+      conversationId: conversation.id,
+      role: "user",
+      content,
+    });
+
+    const allMessages = await aiConversationRepository.listMessages(
+      conversation.id
+    );
+    const historyRows = allMessages.items.slice(-HISTORY_LIMIT);
+    const historyForModel = toChatHistory(historyRows.slice(0, -1));
+
+    return {
+      conversationId: conversation.id,
+      content,
+      targetId: conversation.targetId,
+      targetType: conversation.targetType,
+      scene: conversation.scene,
+      history: historyForModel,
+      questionnaireContext,
+      revisionBefore,
+    };
+  },
+
+  /**
+   * 流式跑一个已准备好的回合（prepareStreamMessage 之后调用）。
+   *
+   * 落库策略（08 文档第 52 节）：
+   *   文本增量即产即发（前端要看到打字效果）；
+   *   工具与 assistant 消息在流结束时统一落库，
+   *   避免「半条消息」进入数据库 —— 文档原先未定义，属于本次明确的取舍。
+   */
+  async *runStreamTurn(input: {
+    prepared: PreparedStreamMessage;
+    ctx: AiServiceContext;
+    provider?: LLMProvider;
+    model?: string;
+    temperature?: number;
+    maxTokens?: number;
+  }): AsyncGenerator<StreamTurnEvent, void, undefined> {
+    const p = input.prepared;
+    const provider = input.provider ?? createLLMProvider();
+
+    // 本回合的工具调用，供结束后成对落库。
+    // 不能靠「按会话查最近 N 条审计」——那会把历史回合的记录重复写一遍。
+    const turnToolCalls: {
+      operationId: string;
+      toolName: string;
+      arguments: unknown;
+      success: boolean;
+    }[] = [];
+
+    let finalContent = "";
+    let truncated = false;
+    let model = input.model ?? "unknown";
+    let lastEmittedRevision: number | undefined;
+
+    for await (const event of runTurnStream({
+      provider,
+      conversationId: p.conversationId,
+      targetType:
+        p.targetType === "template" ? "template" : "questionnaire_instance",
+      targetId: p.targetId,
+      scene: p.scene,
+      userId: input.ctx.userId,
+      roles: input.ctx.roles,
+      userMessage: p.content,
+      history: p.history,
+      questionnaireContext: p.questionnaireContext,
+      ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.temperature !== undefined
+        ? { temperature: input.temperature }
+        : {}),
+      ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+    })) {
+      switch (event.type) {
+        case "text_delta":
+          yield { type: "text_delta", text: event.text };
+          break;
+
+        case "tool_call_start":
+          turnToolCalls.push({
+            operationId: event.operationId,
+            toolName: event.toolName,
+            arguments: event.arguments,
+            success: false,
+          });
+          yield {
+            type: "tool_call_start",
+            toolName: event.toolName,
+            operationId: event.operationId,
+            arguments: event.arguments,
+          };
+          break;
+
+        case "tool_call_result": {
+          const entry = turnToolCalls.find(
+            (t) => t.operationId === event.operationId
+          );
+          if (entry) entry.success = event.success;
+
+          yield {
+            type: "tool_call_result",
+            toolName: event.toolName,
+            operationId: event.operationId,
+            success: event.success,
+            ...(event.errorCode !== undefined
+              ? { errorCode: event.errorCode }
+              : {}),
+            ...(event.revision !== undefined
+              ? { revision: event.revision }
+              : {}),
+          };
+
+          // 结构变化时通知前端刷新。
+          // 不推全量结构：一轮内可能改多次，推全量会让 SSE 体积成倍增长；
+          // 且前端拿到的结构必须与数据库一致，重新 GET 最可靠。
+          if (
+            p.targetType === "questionnaire_instance" &&
+            event.success &&
+            event.revision !== undefined &&
+            event.revision !== lastEmittedRevision
+          ) {
+            lastEmittedRevision = event.revision;
+            yield {
+              type: "questionnaire_updated",
+              questionnaireId: p.targetId,
+              revision: event.revision,
+            };
+          }
+          break;
+        }
+
+        case "done":
+          finalContent = event.content;
+          truncated = event.truncated;
+          model = event.model;
+          break;
+
+        default:
+          break;
+      }
+    }
+
+    // ---- 统一落库：工具调用成对的 assistant + tool 消息，最后是回复文本 ----
+    for (const tc of turnToolCalls) {
+      await aiConversationRepository.appendMessage({
+        conversationId: p.conversationId,
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          {
+            id: tc.operationId,
+            name: tc.toolName,
+            arguments: JSON.stringify(tc.arguments),
+          },
+        ],
+      });
+
+      await aiConversationRepository.appendMessage({
+        conversationId: p.conversationId,
+        role: "tool",
+        content: JSON.stringify({ success: tc.success }),
+        toolName: tc.toolName,
+        toolCallId: tc.operationId,
+      });
+    }
+
+    await aiConversationRepository.appendMessage({
+      conversationId: p.conversationId,
+      role: "assistant",
+      content: finalContent,
+    });
+
+    // 结构真的变了才回传 revision
+    let revisionAfter: number | undefined;
+    if (p.targetType === "questionnaire_instance") {
+      const after = await questionnaireRepository.findInstanceById(p.targetId);
+      revisionAfter = after?.currentRevision;
+    }
+
+    const changed =
+      p.revisionBefore !== undefined &&
+      revisionAfter !== undefined &&
+      revisionAfter !== p.revisionBefore;
+
+    yield {
+      type: "done",
+      content: finalContent,
+      truncated,
+      model,
+      ...(changed && revisionAfter !== undefined
+        ? { revision: revisionAfter }
+        : {}),
+    };
+  },
+
 
   /** 关闭会话（保留历史，仅标记状态） */
   async closeConversation(

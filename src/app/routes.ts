@@ -13,7 +13,7 @@
  */
 import { Router } from "express";
 import { createTemplateRouter } from "../modules/questionnaire/controller/template.controller.js";
-import { createInstanceRouter } from "../modules/questionnaire/controller/instance.controller.js";
+import { createInstanceRouterWithEditor } from "../modules/questionnaire/controller/instance.controller.js";
 import { createAiRouter } from "../modules/ai/routes.js";
 import { createDispatchRouter } from "../modules/dispatch/routes.js";
 import { createResponseRouter } from "../modules/response/routes.js";
@@ -23,7 +23,7 @@ export function createApiRouter(): Router {
   const router = Router();
 
   router.use("/questionnaire-templates", createTemplateRouter());
-  router.use("/questionnaire-instances", createInstanceRouter());
+  router.use("/questionnaire-instances", createInstanceRouterWithEditor());
   router.use("/ai", createAiRouter());
 
   // 下发 / 填写 / 审核：路径直接位于 /api/v1 之下

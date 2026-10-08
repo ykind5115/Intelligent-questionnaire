@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>智能问卷 · 工作台</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">智能问卷 <span class="brand-sub">工作台</span></div>
+
+      <div class="topbar-controls">
+        <label class="field">
+          <span>当前用户</span>
+          <select id="user-select"></select>
+        </label>
+
+        <label class="field grow">
+          <span>问卷实例 ID</span>
+          <input id="instance-input" placeholder="粘贴实例 ID，或点右侧「新建」" />
+        </label>
+
+        <button id="btn-load" class="btn btn-primary">载入</button>
+        <button id="btn-new" class="btn">新建实例</button>
+      </div>
+    </header>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <main class="layout">
+      <!-- ============ 左：AI 对话 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>AI 助手</h2>
+          <span id="chat-status" class="badge">未连接</span>
+        </div>
+
+        <div id="chat-log" class="chat-log">
+          <p class="hint">
+            先在上面载入一个实例，然后用自然语言描述你要怎么改问卷。<br />
+            例如：「增加一个『活动轨迹』分组，问一下最近半年去过哪些地方」
+          </p>
+        </div>
+
+        <form id="chat-form" class="chat-form">
+          <textarea
+            id="chat-input"
+            rows="3"
+            placeholder="描述你要做的修改…（Enter 发送，Shift+Enter 换行）"
+          ></textarea>
+          <button id="chat-send" class="btn btn-primary" type="submit">发送</button>
+        </form>
+      </section>
+
+      <!-- ============ 右：结构编辑器 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>问卷结构</h2>
+          <div class="panel-head-right">
+            <span id="revision-badge" class="badge">revision -</span>
+            <span id="instance-badge" class="badge">未载入</span>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <button id="btn-add-section" class="btn btn-sm">＋ 新增分组</button>
+          <button id="btn-refresh" class="btn btn-sm">刷新</button>
+          <span class="spacer"></span>
+          <button id="btn-confirm" class="btn btn-sm">确认问卷</button>
+          <button id="btn-promote" class="btn btn-sm">扶正为模板</button>
+          <button id="btn-withdraw" class="btn btn-sm btn-danger">撤回</button>
+        </div>
+
+        <div id="structure" class="structure">
+          <p class="hint">尚未载入问卷。</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

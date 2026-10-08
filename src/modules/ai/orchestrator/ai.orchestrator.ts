@@ -117,12 +117,197 @@ function serializeToolResult(result: ToolResult): string {
   return JSON.stringify(result);
 }
 
-/**
- * 执行一次完整的对话回合。
+/** 流式事件（SSE 用）。
  *
- * 流程（08 文档第 25 节）：
- *   构建消息 → 调用模型 → 若要求调用工具则执行并回灌 → 再次调用模型
- *   → 直到模型不再请求工具，或触达轮数上限
+ * 依据 docs/05-api_design.md 第 10.4 节与 08 文档第 52 节：
+ *   前端需要能展示「AI 正在做什么」，但不应看到原始 JSON。
+ *   因此事件分三类：文本增量、工具调用进度、结构已变更。
+ */
+export type TurnEvent =
+  | { type: "text_delta"; text: string }
+  | {
+      type: "tool_call_start";
+      toolName: string;
+      operationId: string;
+      arguments: unknown;
+    }
+  | {
+      type: "tool_call_result";
+      toolName: string;
+      operationId: string;
+      success: boolean;
+      errorCode?: string;
+      /** 结构类操作返回的新 revision，前端据此决定是否刷新结构树 */
+      revision?: number;
+    }
+  | { type: "done"; content: string; truncated: boolean; model: string };
+
+/** 构建首次发给模型的消息序列 */
+function buildMessages(input: RunTurnInput): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: buildSystemPrompt({
+        scene: input.scene,
+        targetType: input.targetType,
+        targetId: input.targetId,
+        questionnaireContext: input.questionnaireContext,
+      }),
+    },
+    ...(input.history ?? []),
+    { role: "user", content: input.userMessage },
+  ];
+}
+
+/** 组装 chat 的调用参数 */
+function chatOptions(input: RunTurnInput, tools: unknown) {
+  return {
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.temperature !== undefined
+      ? { temperature: input.temperature }
+      : {}),
+    ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+    ...(tools ? { tools: tools as never } : {}),
+    ...(input.signal !== undefined ? { signal: input.signal } : {}),
+  };
+}
+
+/**
+ * 流式执行一次对话回合。
+ *
+ * 与 runTurn 的关系：runTurn 就是「把本函数的事件流跑完并汇总」。
+ * 两者共用同一套消息构建、工具执行与轮数上限逻辑，
+ * 避免出现「流式版和非流式版行为不一致」这种典型缺陷。
+ */
+export async function* runTurnStream(
+  input: RunTurnInput
+): AsyncGenerator<TurnEvent, void, undefined> {
+  const traces: ToolTrace[] = [];
+  const toolSpecs = allLlmToolSpecs();
+  const tools = toolSpecs.length > 0 ? toolSpecs : undefined;
+
+  const messages = buildMessages(input);
+
+  let lastModel = input.model ?? "unknown";
+  let round = 0;
+
+  while (round < MAX_TOOL_ROUNDS) {
+    round += 1;
+
+    const stream = input.provider.chatStream(
+      messages,
+      chatOptions(input, tools)
+    );
+
+    let result: ChatResult | undefined;
+
+    for await (const event of stream) {
+      if (event.type === "text_delta") {
+        yield { type: "text_delta", text: event.text };
+      } else if (event.type === "done") {
+        result = event.result;
+      }
+      // tool_call 事件在 done 里已一并汇总，这里不重复推送
+    }
+
+    if (!result) {
+      throw new Error("模型流式响应未以 done 事件结束");
+    }
+
+    lastModel = result.model;
+
+    // 模型没有请求工具 → 回合结束
+    if (result.toolCalls.length === 0) {
+      yield {
+        type: "done",
+        content: result.content ?? "",
+        truncated: false,
+        model: lastModel,
+      };
+      return;
+    }
+
+    messages.push({
+      role: "assistant",
+      content: result.content,
+      toolCalls: result.toolCalls,
+    });
+
+    for (const call of result.toolCalls) {
+      const operationId = newId();
+      const parsed = parseArguments(call.arguments);
+
+      yield {
+        type: "tool_call_start",
+        toolName: call.name,
+        operationId,
+        arguments: parsed.ok ? parsed.value : call.arguments,
+      };
+
+      let toolResult: ToolResult;
+
+      if (!parsed.ok) {
+        toolResult = {
+          success: false,
+          error: { code: "INVALID_PARAMETER", message: parsed.error },
+          metadata: { operation_id: operationId },
+        };
+      } else {
+        const context: ToolContext = {
+          userId: input.userId,
+          roles: input.roles,
+          operationId,
+          scene: input.scene,
+          targetType: input.targetType,
+          targetId: input.targetId,
+          conversationId: input.conversationId,
+          ...(input.model !== undefined ? { model: input.model } : {}),
+        };
+
+        toolResult = await runTool(call.name, parsed.value, context, {
+          service: questionnaireService,
+        });
+      }
+
+      traces.push({
+        round,
+        operationId,
+        toolName: call.name,
+        arguments: parsed.ok ? parsed.value : call.arguments,
+        result: toolResult,
+      });
+
+      yield {
+        type: "tool_call_result",
+        toolName: call.name,
+        operationId,
+        success: toolResult.success,
+        ...(toolResult.error?.code !== undefined
+          ? { errorCode: toolResult.error.code }
+          : {}),
+        ...(toolResult.metadata?.revision !== undefined
+          ? { revision: toolResult.metadata.revision }
+          : {}),
+      };
+
+      messages.push({
+        role: "tool",
+        content: serializeToolResult(toolResult),
+        toolCallId: call.id,
+        name: call.name,
+      });
+    }
+  }
+
+  // 触达轮数上限：收尾而不是报错（08 文档第 25.4 节）
+  const content = await buildTruncationMessage(input, messages);
+  yield { type: "done", content, truncated: true, model: lastModel };
+}
+
+/**
+ * 执行一次完整的对话回合（非流式）。
+ *
+ * 实现方式是「把流式版本跑完并汇总」——单一实现，避免两份逻辑漂移。
  */
 export async function runTurn(input: RunTurnInput): Promise<RunTurnOutput> {
   const traces: ToolTrace[] = [];
