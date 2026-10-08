@@ -30,30 +30,113 @@ AI 辅助的问卷生成与动态编排系统。用自然语言描述调查需�
 | 测试 | Vitest 3 | 集成测试直连真实数据库 |
 | 前端 | 原生 HTML/CSS/JS | 无构建链，内网可直接部署 |
 
+## 当前进度
+
+| 能力 | 状态 |
+| --- | --- |
+| 设计文档（需求 / 架构 / Schema / 数据库 / API / 项目结构） | ✅ |
+| 设计评审与决策固化（D1–D13） | ✅ |
+| 工程骨架（依赖、TS 配置、Prisma schema、12 张表迁移） | ✅ |
+| 测试数据 seed（4 个账号 + 2 套模板 + 1 个实例） | ✅ |
+| Questionnaire Operation 层（6 个纯函数）+ Repository + Service | ✅ |
+| 7 个 AI Tool + Tool Registry（含 JSON Schema 生成） | ✅ |
+| LLM Provider 抽象 + DeepSeek 实现（决策 D12） | ✅ |
+| AI Orchestrator（上下文 + 工具循环 + 轮数上限 + 幂等） | ✅ |
+| REST API：模板 / 实例 / 人工编辑器 / AI / 下发 / 填写 / 审核 | ✅ |
+| SSE 流式端点 + 工作台前端 | ✅ |
+| 人工编辑器（决策 D3 兜底） | ✅ |
+| AI 评测用例集（决策 D5，含四类量化指标） | ✅ |
+| 测试：242 例全绿（11 个文件，含真实数据库集成测试） | ✅ |
+| 真实模型端到端验证（需 `AI_API_KEY`） | ⬜ 待你提供 Key |
+| 前端填写界面与审核界面 | ⬜ 目前走 API |
+
 ## 快速开始
+
+### 环境要求
+
+- Node.js ≥ 22
+- pnpm
+- 不需要自己装 PostgreSQL：`prisma dev` 会提供一个免安装的本地实例
+
+### 安装与初始化
 
 ```bash
 # 1. 安装依赖
-#    注意：必须先确认 pnpm-workspace.yaml 里的 allowBuilds 已包含
-#    prisma / @prisma/engines / esbuild，否则 pnpm 会跳过这些包的构建脚本，
-#    导致 pnpm exec 完全不可用（详见 docs/06 第 3B 节）
 pnpm install
+```
 
+> ⚠️ **`pnpm-workspace.yaml` 里的 `allowBuilds` 必须先包含
+> `prisma` / `@prisma/engines` / `esbuild`**，否则 pnpm 会跳过这些包的构建脚本，
+> 导致 `pnpm exec` 完全不可用（连 `tsx`、`vitest` 都跑不了）。
+> 这一项只有写在 `pnpm-workspace.yaml` 才生效，
+> 写在 `package.json` 的 `onlyBuiltDependencies` 会被忽略。
+> 若已经装坏了：删掉 `node_modules` 重新 `pnpm install`。
+
+```bash
 # 2. 准备环境变量
 cp .env.example .env
 
-# 3. 启动本地数据库（Prisma 提供的免安装 Postgres）
+# 3. 启动本地数据库（后台运行）
 pnpm exec prisma dev -d
 
-# 4. 建表 + 灌入种子数据
-pnpm db:push
-pnpm db:seed        # 会打印 4 个测试账号的 UUID
-
-# 5. 启动服务
-pnpm dev            # http://127.0.0.1:3000
+# 4. 查看直连地址，填进 .env 的 DATABASE_URL
+pnpm exec prisma dev ls
 ```
 
-然后打开 **http://127.0.0.1:3000** 就是工作台页面。
+把输出的**直连 TCP 地址**填进 `.env`：
+
+```text
+postgres://postgres:postgres@localhost:51214/template1?sslmode=disable
+```
+
+> 注意：**不要用 `prisma+postgres://` 代理地址**。迁移需要 shadow database，
+> 代理地址不支持。
+
+```bash
+# 5. 建表并生成客户端
+pnpm db:push
+pnpm db:generate
+
+# 6. 写入测试数据（会打印 4 个账号的 UUID）
+pnpm db:seed
+
+# 7. 启动服务
+pnpm dev            # → http://127.0.0.1:3000
+```
+
+打开 **http://127.0.0.1:3000** 就是工作台页面。
+
+### 常用命令
+
+```bash
+pnpm dev            # 开发模式（tsx watch）
+pnpm build          # 编译到 dist/
+pnpm start          # 跑编译产物
+pnpm typecheck      # 类型检查
+pnpm test           # 全量测试
+pnpm test:watch
+pnpm db:studio      # 图形化查看数据
+pnpm db:reset       # 清空并重新迁移（会丢数据）
+pnpm lint / pnpm format
+```
+
+### 确认数据库回到了干净基线
+
+正常情况下应当只有 seed 的 2 个模板 / 2 个版本 / 1 个实例，其余表为空。
+若有残留：
+
+```bash
+pnpm exec prisma migrate reset --force   # 清空重建
+pnpm db:seed
+```
+
+## 开发态鉴权（决策 D11）
+
+请求头 `x-user-id: <用户UUID>` 指定以谁的身份操作（不带则回退到 `dispatcher1`）。
+四个测试账号的 UUID 由 `pnpm db:seed` 打印，也可以用
+`GET /api/v1/dev/users` 取（**仅非生产环境提供**）。
+
+生产环境没有真实鉴权时服务**拒绝启动**。
 
 ## 环境变量
 
@@ -149,6 +232,36 @@ revision 只 +1，其余返回幂等重放。唯一约束只作兜底，不依�
 
 **横向授权**：不仅校验「你的角色能不能做这类操作」，还校验
 「**这一份数据是不是你的**」。规则见下方权限表。
+
+### 几条关键业务规则
+
+**下发后结构冻结（决策 D1）**
+
+```text
+draft / confirmed       → 允许修改结构
+已下发（dispatched 之后）→ 禁止修改，必须先撤回
+```
+
+调查员负责上门核查，具体核查哪些内容由下发人员决定，
+因此「下发」代表核查内容已布置完毕。需要改动时走
+**撤回 → 修改 → 二次下发**。撤回会把既有答卷与下发任务一并置为
+`withdrawn`，二次下发时调查员拿到的是**新的**可写答卷。
+
+**临时改动可以扶正（决策 D2）**
+
+同类案件反复出现同样的临时改动，说明标准模板缺失。实例上提供
+「扶正为模板版本」，生成模板**草稿版本**，仍需走正常发布流程
+（不能绕过发布治理）。
+
+**一次 Tool 调用 = 一个 `operation_id` = 一次 Revision（决策 D9）**
+
+因此一条用户消息可能产生多次 Revision，这是设计目标而不是异常。
+
+**AI 创建问卷走 `create_template` 场景**
+
+目标是模板的**草稿版本**（允许写入）；已发布的正式版本拒绝修改。
+`POST /ai/conversations/{id}/commit` 是这类会话的唯一保存路径，
+它只把草稿定稿，**不会自动发布**。
 
 ## 权限模型（决策 D8）
 
@@ -358,6 +471,17 @@ CI 里用假 Provider 驱动，得到全绿只能证明**评测器与业务链�
 - 前端不做乐观更新：写操作失败后会重新拉取结构，
   因此界面始终与数据库一致，但代价是多一次请求。
 - `conversationId` 目前每次载入实例都新建，未复用未关闭的历史会话。
+
+### 几条容易踩的环境注意事项
+
+1. **`pnpm-workspace.yaml` 不能删**：pnpm 11 默认拦截 Prisma / esbuild 的构建脚本，
+   删掉它安装会直接失败。
+2. **`DATABASE_URL` 必须用直连 TCP 地址**：`prisma+postgres://` 代理地址无法用于迁移
+   （shadow database 不支持）。
+3. **`prisma dev` 的端口是随机的**：换环境后需要重新
+   `pnpm exec prisma dev ls` 并更新 `.env`。
+4. **`.env` 与 `generated/` 都不提交 Git**：真实密钥不入库；
+   Prisma 客户端由 `pnpm db:generate` 生成，模板见 `.env.example`。
 
 ## 文档
 
