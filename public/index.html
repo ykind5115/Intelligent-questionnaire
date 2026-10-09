@@ -17,12 +17,13 @@
         </label>
 
         <label class="field grow">
-          <span>问卷实例 ID</span>
-          <input id="instance-input" placeholder="粘贴实例 ID，或点右侧「新建」" />
+          <span id="target-label">问卷实例 ID</span>
+          <input id="instance-input" placeholder="粘贴实例 ID，或点右侧「新建实例」" />
         </label>
 
         <button id="btn-load" class="btn btn-primary">载入</button>
         <button id="btn-new" class="btn">新建实例</button>
+        <button id="btn-new-template" class="btn">从零创建问卷</button>
       </div>
     </header>
 
@@ -38,8 +39,11 @@
 
         <div id="chat-log" class="chat-log">
           <p class="hint">
-            先在上面载入一个实例，然后用自然语言描述你要怎么改问卷。<br />
-            例如：「增加一个『活动轨迹』分组，问一下最近半年去过哪些地方」
+            <b>改现有案件</b>：先载入一个实例，再说你要怎么改。<br />
+            例如：「增加一个『活动轨迹』分组，问一下最近半年去过哪些地方」<br /><br />
+            <b>从零创建问卷</b>：点右上角「从零创建问卷」（需模板管理员账号），
+            然后直接描述你要一份什么样的问卷。<br />
+            建好后点结构树上方的「保存为模板草稿」定稿。
           </p>
         </div>
 
@@ -66,6 +70,9 @@
         <div class="toolbar">
           <button id="btn-add-section" class="btn btn-sm">＋ 新增分组</button>
           <button id="btn-refresh" class="btn btn-sm">刷新</button>
+          <button id="btn-commit" class="btn btn-sm btn-primary" hidden>
+            保存为模板草稿
+          </button>
           <span class="spacer"></span>
           <button id="btn-confirm" class="btn btn-sm">确认问卷</button>
           <button id="btn-promote" class="btn btn-sm">扶正为模板</button>

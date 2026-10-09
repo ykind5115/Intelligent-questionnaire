@@ -224,20 +224,33 @@ export const aiConversationService = {
     }
 
     if (input.scene === "create_template") {
-      if (!input.targetId) {
-        throw validationError(
-          "create_template 场景必须提供 targetId（草稿模板版本 id）",
-          { path: "targetId" }
+      // ---- 从零创建：没给目标就自动建一个草稿模板版本 ----
+      //
+      // 这一步是「对话式创建问卷」的关键便利：
+      // 原本要求调用方先建模板、再建版本、再建会话（三个来回），
+      // 前端很容易只实现「改实例」那条路，于是功能其实存在却没人用得上。
+      // 现在一条请求即可从零开始。
+      let targetVersionId = input.targetId;
+
+      if (!targetVersionId) {
+        // 建模板需要 template_admin：AI 创建问卷属于模板治理动作。
+        // 若当前用户不是模板管理员，这里会抛出清晰的 PERMISSION_DENIED。
+        const template = await templateService.createTemplate(
+          { name: `AI 新建问卷 ${new Date().toISOString().slice(0, 16).replace("T", " ")}` },
+          ctx
         );
+
+        const version = await templateService.createVersion(template.id, {}, ctx);
+        targetVersionId = version.id;
       }
 
       const version = await questionnaireRepository.findTemplateVersionById(
-        input.targetId
+        targetVersionId
       );
       if (!version) {
         throw new OperationError(
           ErrorCode.TEMPLATE_VERSION_NOT_FOUND,
-          `模板版本不存在：${input.targetId}`
+          `模板版本不存在：${targetVersionId}`
         );
       }
       if (version.status !== "draft") {
@@ -254,11 +267,23 @@ export const aiConversationService = {
         targetId: version.id,
       });
 
+      // 把模板与版本的 id 一并回传：前端 commit 后需要它们来展示结果，
+      // 也便于用户知道「这次对话最终落到哪个模板」。
+      const created = !input.targetId;
+
       return {
         conversationId: conversation.id,
         scene: conversation.scene,
         targetType: conversation.targetType ?? "template",
         targetId: conversation.targetId ?? version.id,
+        // 只有本次新建时才额外返回模板 id（避免让调用方以为是既有模板）
+        ...(created
+          ? {
+              templateId: version.templateId,
+              templateVersionId: version.id,
+              createdTemplate: true,
+            }
+          : {}),
       };
     }
 

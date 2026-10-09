@@ -26,6 +26,21 @@ const state = {
   schema: null,
   /** 正在流式对话时禁用发送 */
   streaming: false,
+
+  // ---- 工作模式 ----
+  /**
+   * "instance"  改现有案件（目标是一份问卷实例）
+   * "template"  从零创建问卷（目标是一个模板草稿版本）
+   *
+   * 两种模式共用同一套对话与结构渲染，差别只在目标与可用的动作。
+   */
+  mode: "instance",
+  /** template 模式下的模板 id（commit 后用于展示） */
+  templateId: null,
+  /** template 模式下的草稿版本 id */
+  templateVersionId: null,
+  /** 该草稿是否已 commit 定稿 */
+  committed: false,
 };
 
 // ============================================================
@@ -131,12 +146,19 @@ async function loadInstance(instanceId) {
       "GET",
       `/api/v1/questionnaire-instances/${instanceId}`
     );
+    // 载入实例即切回「改现有案件」模式
+    state.mode = "instance";
+    state.templateId = null;
+    state.templateVersionId = null;
+    state.committed = false;
+
     state.instanceId = instanceId;
     state.revision = data.currentRevision;
     state.status = data.status;
     state.schema = data.currentSchema;
 
     $("instance-input").value = instanceId;
+    applyModeToUi();
     renderStructure();
     renderBadges();
 
@@ -161,6 +183,31 @@ async function ensureConversation() {
   conversationId = null;
   setChatStatus("连接中…");
 
+  if (state.mode === "template") {
+    // 从零创建：不传 targetId，后端会自动建一个草稿模板版本
+    try {
+      const conv = await api("POST", "/api/v1/ai/conversations", {
+        scene: "create_template",
+        targetType: "template",
+      });
+      conversationId = conv.conversationId;
+      state.templateId = conv.templateId ?? null;
+      state.templateVersionId = conv.templateVersionId ?? null;
+      setChatStatus("草稿模式");
+      await refreshStructure();
+    } catch (e) {
+      setChatStatus("不可用", "warn");
+      addMessage(
+        "assistant",
+        e.code === "PERMISSION_DENIED"
+          ? "从零创建问卷属于模板治理动作，需要「模板管理员」账号。\n" +
+            "请先在左上角把当前用户切换成 admin，再点「从零创建问卷」。"
+          : `无法创建模板草稿：${e.message}`
+      );
+    }
+    return;
+  }
+
   try {
     const conv = await api("POST", "/api/v1/ai/conversations", {
       scene: "modify_questionnaire",
@@ -182,6 +229,34 @@ async function ensureConversation() {
   }
 }
 
+/**
+ * 根据当前模式调整界面：标签文案、按钮可见性。
+ *
+ * 两种模式的可用动作不同：
+ *   instance：确认 / 扶正 / 撤回
+ *   template：保存为模板草稿（commit）
+ */
+function applyModeToUi() {
+  const isTemplate = state.mode === "template";
+
+  $("target-label").textContent = isTemplate ? "模板草稿版本 ID" : "问卷实例 ID";
+  $("instance-input").placeholder = isTemplate
+    ? "模板草稿由「从零创建问卷」自动生成"
+    : "粘贴实例 ID，或点右侧「新建实例」";
+
+  // commit 按钮只在模板模式下出现，且已定稿后隐藏
+  $("btn-commit").hidden = !isTemplate || state.committed;
+
+  for (const id of ["btn-confirm", "btn-promote", "btn-withdraw", "btn-add-section"]) {
+    $(id).hidden = isTemplate;
+  }
+  $("btn-new").hidden = false;
+  $("btn-load").hidden = isTemplate;
+
+  // 模板模式下没有「下发」概念，状态徽标换成草稿
+  renderBadges();
+}
+
 function setChatStatus(text, kind) {
   const node = $("chat-status");
   node.textContent = text;
@@ -193,6 +268,17 @@ function setChatStatus(text, kind) {
 // ============================================================
 
 function renderBadges() {
+  if (state.mode === "template") {
+    // 模板草稿没有 revision 概念，展示草稿/已定稿状态即可
+    $("revision-badge").textContent = state.templateVersionId
+      ? `草稿 ${state.templateVersionId.slice(0, 8)}`
+      : "模板草稿";
+    const b = $("instance-badge");
+    b.textContent = state.committed ? "已保存为草稿" : "编辑中";
+    b.className = "badge" + (state.committed ? " ok" : " warn");
+    return;
+  }
+
   $("revision-badge").textContent = `revision ${state.revision ?? "-"}`;
   const badge = $("instance-badge");
   badge.textContent = state.status ?? "未载入";
@@ -209,7 +295,16 @@ function renderBadges() {
 
 /** 结构是否可编辑：draft 与 confirmed 可改，其余冻结（与后端 assertInstanceWritable 一致） */
 function structureEditable() {
+  // 模板草稿始终可改（后端只允许 draft 版本进 AI 流程）
+  if (state.mode === "template") return true;
   return state.status === "draft" || state.status === "confirmed";
+}
+
+/** 当前模式下的编辑器基础路径 */
+function editorBase() {
+  return state.mode === "template"
+    ? `/api/v1/questionnaire-templates/${state.templateId}/versions/${state.templateVersionId}`
+    : `/api/v1/questionnaire-instances/${state.instanceId}`;
 }
 
 function renderStructure() {
@@ -254,7 +349,7 @@ function renderSection(section, allSections) {
       }
       await edit(
         "PATCH",
-        `/api/v1/questionnaire-instances/${state.instanceId}/sections/${section.id}`,
+        `${editorBase()}/sections/${section.id}`,
         { title: next }
       );
     });
@@ -312,7 +407,7 @@ function renderQuestion(q, section, index, siblings, allSections) {
       }
       await edit(
         "PATCH",
-        `/api/v1/questionnaire-instances/${state.instanceId}/questions/${q.id}`,
+        `${editorBase()}/questions/${q.id}`,
         { title: next }
       );
     });
@@ -420,6 +515,20 @@ async function edit(method, path, body) {
 }
 
 async function refreshStructure() {
+  // ---- 模板草稿模式：结构挂在模板版本上 ----
+  if (state.mode === "template") {
+    if (!state.templateId || !state.templateVersionId) return;
+    const data = await api(
+      "GET",
+      `/api/v1/questionnaire-templates/${state.templateId}/versions/${state.templateVersionId}`
+    );
+    state.schema = data.schema;
+    state.status = data.status;
+    renderStructure();
+    renderBadges();
+    return;
+  }
+
   if (!state.instanceId) return;
   const data = await api(
     "GET",
@@ -435,7 +544,7 @@ async function refreshStructure() {
 async function addSection() {
   const title = prompt("新分组的标题？");
   if (!title || !title.trim()) return;
-  await edit("POST", `/api/v1/questionnaire-instances/${state.instanceId}/sections`, {
+  await edit("POST", `${editorBase()}/sections`, {
     title: title.trim(),
   });
 }
@@ -471,7 +580,7 @@ async function addQuestion(sectionId) {
 
   await edit(
     "POST",
-    `/api/v1/questionnaire-instances/${state.instanceId}/questions`,
+    `${editorBase()}/questions`,
     {
       sectionId,
       type,
@@ -486,14 +595,14 @@ async function removeQuestion(questionId) {
   if (!confirm("确定删除这道题？")) return;
   await edit(
     "DELETE",
-    `/api/v1/questionnaire-instances/${state.instanceId}/questions/${questionId}`
+    `${editorBase()}/questions/${questionId}`
   );
 }
 
 async function moveQuestion(questionId, targetSectionId, targetOrder) {
   await edit(
     "PATCH",
-    `/api/v1/questionnaire-instances/${state.instanceId}/questions/${questionId}/move`,
+    `${editorBase()}/questions/${questionId}/move`,
     {
       targetSectionId,
       ...(targetOrder !== undefined ? { targetOrder } : {}),
@@ -744,6 +853,79 @@ async function doWithdraw() {
   }
 }
 
+/** 从零创建问卷：建 create_template 会话（后端自动建草稿模板版本） */
+async function doNewTemplate() {
+  // 模板治理需要 template_admin：提前给出可操作的提示，
+  // 而不是等后端 403 再让用户猜原因。
+  const selected = $("user-select");
+  const selectedText = selected.options[selected.selectedIndex]?.textContent ?? "";
+  if (!selectedText.includes("template_admin")) {
+    toast(
+      "从零创建问卷需要「模板管理员」账号。\n请先在左上角把用户切换成「模板管理员」再试。",
+      true
+    );
+    return;
+  }
+
+  // 切到模板模式并清空上一轮的结构
+  state.mode = "template";
+  state.instanceId = null;
+  state.revision = null;
+  state.status = null;
+  state.schema = null;
+  state.templateId = null;
+  state.templateVersionId = null;
+  state.committed = false;
+
+  applyModeToUi();
+  renderStructure();
+
+  $("chat-log").textContent = "";
+  addMessage(
+    "assistant",
+    "好，我们从头做一份新问卷。\n直接描述你要调查什么即可 —— " +
+      "比如「做一个无人机黑飞核查问卷，要问是否拥有无人机、有没有飞过、在哪里飞过」。\n" +
+      "我建好之后，你可以点右上方的「保存为模板草稿」定稿。"
+  );
+
+  await ensureConversation();
+  $("chat-input").focus();
+}
+
+/** 把模板草稿定稿保存（05 文档第 33 节：create_template 的唯一保存路径） */
+async function doCommit() {
+  if (state.mode !== "template" || !conversationId) {
+    toast("当前没有可保存的模板草稿", true);
+    return;
+  }
+
+  const name = prompt("这份问卷叫什么名字？", "新建问卷");
+  if (!name || !name.trim()) return;
+
+  try {
+    const data = await api(
+      "POST",
+      `/api/v1/ai/conversations/${conversationId}/commit`,
+      { name: name.trim() }
+    );
+    state.committed = true;
+    applyModeToUi();
+    toast(
+      `已保存为模板草稿 v${data.versionNo}（模板 ${String(data.templateId).slice(0, 8)}）。\n` +
+        "注意：commit 只产草稿，不会自动发布 —— 发布需走模板发布接口。"
+    );
+  } catch (e) {
+    if (e.code === "VALIDATION_ERROR") {
+      toast(
+        "这份问卷还是空的（或只有分组没有题目），无法保存。\n请先让 AI 加上至少一个分组和一道题。",
+        true
+      );
+    } else {
+      toast(`保存失败：${e.message}`, true);
+    }
+  }
+}
+
 /**
  * 新建实例：找一个已发布的模板版本并据此创建。
  *
@@ -842,6 +1024,8 @@ async function init() {
   );
 
   $("btn-new").addEventListener("click", doNewInstance);
+  $("btn-new-template").addEventListener("click", doNewTemplate);
+  $("btn-commit").addEventListener("click", doCommit);
   $("btn-refresh").addEventListener("click", () =>
     refreshStructure().catch((e) => toast(e.message, true))
   );

@@ -617,8 +617,6 @@ describe("鉴权", () => {
 // 而当时的测试还把这种错误行为断言成了正确。
 // ============================================================
 
-
-
 /** 用 API 建一个模板 + 草稿版本，返回版本 id */
 async function createDraftVersion(): Promise<string> {
   const t = await request("POST", "/api/v1/questionnaire-templates", {
@@ -639,6 +637,120 @@ async function createDraftVersion(): Promise<string> {
 }
 
 describe("AI 创建模板（create_template 场景）", () => {
+  /**
+   * 从零创建：**不传 targetId**，后端自动建草稿模板 + 版本。
+   *
+   * 这是「对话式创建问卷」的关键便利性改动：
+   * 原先要求调用方先建模板、再建版本、再建会话（三个来回），
+   * 前端很容易只实现「改实例」那条路，于是功能存在却没人用得上。
+   */
+  it("不传 targetId → 自动创建草稿模板版本（从零开始）", async () => {
+    const res = await request("POST", `${AI_BASE}/conversations`, {
+      userId: USERS.admin,
+      body: { scene: "create_template", targetType: "template" },
+    });
+
+    expect(res.status).toBe(201);
+    const data = res.body.data as Record<string, unknown>;
+    expect(data["scene"]).toBe("create_template");
+    expect(data["targetType"]).toBe("template");
+    expect(data["createdTemplate"]).toBe(true);
+    expect(typeof data["templateId"]).toBe("string");
+    expect(typeof data["templateVersionId"]).toBe("string");
+
+    createdTemplateIds.push(data["templateId"] as string);
+    createdConversations.push(data["conversationId"] as string);
+
+    // 真的建出了一个 draft 版本
+    const v = await prisma.questionnaireTemplateVersion.findUnique({
+      where: { id: data["templateVersionId"] as string },
+      select: { status: true, templateId: true },
+    });
+    expect(v?.status).toBe("draft");
+    expect(v?.templateId).toBe(data["templateId"]);
+  });
+
+  it("从零创建 → 写入 → commit 的完整链路", async () => {
+    // 1) 从零建会话（自动建草稿）
+    const conv = await request("POST", `${AI_BASE}/conversations`, {
+      userId: USERS.admin,
+      body: { scene: "create_template", targetType: "template" },
+    });
+    expect(conv.status).toBe(201);
+    const cid = conv.body.data?.["conversationId"] as string;
+    const tid = conv.body.data?.["templateId"] as string;
+    const vid = conv.body.data?.["templateVersionId"] as string;
+    createdConversations.push(cid);
+    createdTemplateIds.push(tid);
+
+    app.locals.aiProvider = new ScriptedProvider([
+      toolCallReply([
+        { id: "c1", name: "add_section", args: { title: "基本信息" } },
+      ]),
+      { content: "已建立分组。", toolCalls: [], model: "scripted" },
+    ]);
+
+    // 2) 通过对话写入
+    const msg = await request(
+      "POST",
+      `${AI_BASE}/conversations/${cid}/messages`,
+      { userId: USERS.admin, body: { content: "先建一个基本信息分组" } }
+    );
+    expect(msg.status).toBe(200);
+    delete app.locals.aiProvider;
+
+    // 3) 直接补一道题（模拟 AI 已加题），再 commit
+    const draft = await prisma.questionnaireTemplateVersion.findUnique({
+      where: { id: vid },
+      select: { schema: true },
+    });
+    const schema = draft?.schema as {
+      sections: { questions: unknown[] }[];
+    };
+    schema.sections[0]!.questions.push({
+      id: "q_name",
+      type: "text",
+      title: "姓名",
+      required: true,
+      order: 1,
+    });
+    await prisma.questionnaireTemplateVersion.update({
+      where: { id: vid },
+      data: { schema: schema as object },
+    });
+
+    const committed = await request(
+      "POST",
+      `${AI_BASE}/conversations/${cid}/commit`,
+      { userId: USERS.admin, body: { name: `从零创建-${Date.now()}` } }
+    );
+    expect(committed.status).toBe(201);
+    expect(committed.body.data?.["status"]).toBe("draft");
+    expect(committed.body.data?.["templateVersionId"]).toBe(vid);
+  });
+
+  it("dispatcher 从零创建 → 403（模板治理需要 template_admin）", async () => {
+    const res = await request("POST", `${AI_BASE}/conversations`, {
+      userId: USERS.dispatcher,
+      body: { scene: "create_template", targetType: "template" },
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error?.code).toBe("PERMISSION_DENIED");
+
+    // 关键：被拒时不能留下半个模板
+    const count = await prisma.questionnaireTemplate.count({
+      where: { name: { startsWith: "AI 新建问卷" } },
+    });
+    const leaked = await prisma.questionnaireTemplate.findMany({
+      where: { createdBy: USERS.dispatcher },
+      select: { id: true },
+    });
+    // dispatcher 不应该拥有任何模板
+    expect(leaked).toHaveLength(0);
+    void count;
+  });
+
   it("可以创建会话（targetType=template，绑草稿版本）", async () => {
     const versionId = await createDraftVersion();
 
