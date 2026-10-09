@@ -193,6 +193,20 @@ export type StreamTurnEvent =
       revision?: number;
     };
 
+/**
+ * 把时间格式化成「YYYY-MM-DD HH:mm」的**本地**时间字符串。
+ *
+ * 不能用 toISOString()：它永远返回 UTC，东八区用户会看到差 8 小时的时间，
+ * 在模板名、日志这类给人看的地方会直接被当成数据错误。
+ */
+function formatLocalTimestamp(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}`
+  );
+}
+
 export const aiConversationService = {
   // ----------------------------------------------------------
   // 创建会话
@@ -235,8 +249,12 @@ export const aiConversationService = {
       if (!targetVersionId) {
         // 建模板需要 template_admin：AI 创建问卷属于模板治理动作。
         // 若当前用户不是模板管理员，这里会抛出清晰的 PERMISSION_DENIED。
+        //
+        // 名称里用**本地时间**：toISOString() 永远返回 UTC，
+        // 会让东八区用户看到「AI 新建问卷 07:48」而当时其实是 15:48，
+        // 很容易被误认为数据不对。这个只是个占位名，commit 时会被真实名称覆盖。
         const template = await templateService.createTemplate(
-          { name: `AI 新建问卷 ${new Date().toISOString().slice(0, 16).replace("T", " ")}` },
+          { name: `AI 新建问卷 ${formatLocalTimestamp(new Date())}` },
           ctx
         );
 
