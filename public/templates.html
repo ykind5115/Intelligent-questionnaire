@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>模板管理 · 智能问卷</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        智能问卷 <span class="brand-sub">模板管理</span>
+      </div>
+
+      <div class="topbar-controls">
+        <label class="field">
+          <span>当前用户</span>
+          <select id="user-select"></select>
+        </label>
+
+        <label class="field grow">
+          <span>搜索模板</span>
+          <input id="search-input" placeholder="按名称搜索，回车即查" />
+        </label>
+
+        <label class="field">
+          <span>状态</span>
+          <select id="status-filter">
+            <option value="">全部</option>
+            <option value="draft">草稿</option>
+            <option value="published">已发布</option>
+            <option value="disabled">已停用</option>
+          </select>
+        </label>
+
+        <button id="btn-search" class="btn btn-primary">搜索</button>
+        <button id="btn-reload" class="btn">刷新</button>
+        <a class="btn" href="/">← 回到工作台</a>
+      </div>
+    </header>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <main class="manage-layout">
+      <!-- ============ 列表 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>模板列表</h2>
+          <div class="panel-head-right">
+            <span id="count-badge" class="badge">-</span>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>状态</th>
+                <th>版本</th>
+                <th>当前版本</th>
+                <th>创建时间</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody id="template-rows">
+              <tr>
+                <td colspan="6" class="empty">载入中…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pager">
+          <button id="btn-prev" class="btn btn-sm">上一页</button>
+          <span id="page-info" class="hint">-</span>
+          <button id="btn-next" class="btn btn-sm">下一页</button>
+        </div>
+      </section>
+
+      <!-- ============ 详情 / 编辑 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2 id="detail-title">模板详情</h2>
+          <span id="detail-status" class="badge">未选择</span>
+        </div>
+
+        <div id="detail-body" class="detail">
+          <p class="hint">从左侧列表点一个模板查看详情。</p>
+        </div>
+      </section>
+    </main>
+
+    <script src="/templates.js"></script>
+  </body>
+</html>

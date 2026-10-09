@@ -17,6 +17,7 @@ import { validate, validatedQuery } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireSchema } from "../../questionnaire/schema/questionnaire.schema.js";
 import { templateService } from "../../questionnaire/service/template.service.js";
+import { createTemplateEditorRouter } from "./editor.controller.js";
 
 // ============================================================
 // 请求 Schema
@@ -26,6 +27,22 @@ const createTemplateBody = z.object({
   name: z.string().min(1).max(200),
   description: z.string().max(2000).optional(),
 });
+
+/**
+ * 更新模板：只允许改名称与描述，且至少给一个。
+ *
+ * description 允许传 null 表示「清空描述」——
+ * 若只允许 string，前端就没法把描述删掉（undefined 表示"不改"）。
+ */
+const updateTemplateBody = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    description: z.string().max(2000).nullable().optional(),
+  })
+  .refine(
+    (v) => v.name !== undefined || v.description !== undefined,
+    "至少要提供 name 或 description 之一"
+  );
 
 const listQuery = z.object({
   page: z.coerce.number().int().positive().optional(),
@@ -157,6 +174,44 @@ export function createTemplateRouter(): Router {
     })
   );
 
+  // ---- 更新模板（模板管理页的「保存」） ----
+  //
+  // 只能改名称与描述：结构属于版本，状态由 publish/disable 控制。
+  router.patch(
+    "/:templateId",
+    validate({ params: idParams, body: updateTemplateBody }),
+    asyncHandler(async (req: Request, res: Response) => {
+      const { templateId } = req.params as z.infer<typeof idParams>;
+      const body = req.body as z.infer<typeof updateTemplateBody>;
+
+      const updated = await templateService.updateTemplate(
+        templateId,
+        {
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.description !== undefined
+            ? { description: body.description }
+            : {}),
+        },
+        serviceContextOf(req)
+      );
+      sendSuccess(req, res, toTemplateDto(updated));
+    })
+  );
+
+  // ---- 删除模板（连带其版本；有实例引用时拒绝） ----
+  router.delete(
+    "/:templateId",
+    validate({ params: idParams }),
+    asyncHandler(async (req: Request, res: Response) => {
+      const { templateId } = req.params as z.infer<typeof idParams>;
+      const result = await templateService.deleteTemplate(
+        templateId,
+        serviceContextOf(req)
+      );
+      sendSuccess(req, res, result);
+    })
+  );
+
   // ---- 版本列表 ----
   router.get(
     "/:templateId/versions",
@@ -241,5 +296,25 @@ export function createTemplateRouter(): Router {
     })
   );
 
+  return router;
+}
+
+/**
+ * 模板路由（含模板草稿的人工编辑器子路由）。
+ *
+ * 人工编辑器（决策 D3）挂在同一前缀下，路径形如：
+ *   POST   /questionnaire-templates/{tid}/versions/{vid}/sections
+ *   PATCH  /questionnaire-templates/{tid}/versions/{vid}/sections/{sectionId}
+ *   POST   /questionnaire-templates/{tid}/versions/{vid}/questions
+ *   PATCH  /questionnaire-templates/{tid}/versions/{vid}/questions/{questionId}
+ *   PATCH  /questionnaire-templates/{tid}/versions/{vid}/questions/{questionId}/move
+ *   DELETE /questionnaire-templates/{tid}/versions/{vid}/questions/{questionId}
+ *
+ * 与实例编辑器共用同一套 Service 与 Operation 层，
+ * 因此规则（权限、只能改 draft、乐观锁、审计）完全一致。
+ */
+export function createTemplateRouterWithEditor(): Router {
+  const router = createTemplateRouter();
+  router.use("/", createTemplateEditorRouter());
   return router;
 }

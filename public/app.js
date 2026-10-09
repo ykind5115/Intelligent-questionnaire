@@ -41,6 +41,8 @@ const state = {
   templateVersionId: null,
   /** 该草稿是否已 commit 定稿 */
   committed: false,
+  /** 该草稿是否已发布为正式模板（发布后不能再改） */
+  published: false,
 };
 
 // ============================================================
@@ -151,6 +153,7 @@ async function loadInstance(instanceId) {
     state.templateId = null;
     state.templateVersionId = null;
     state.committed = false;
+    state.published = false;
 
     state.instanceId = instanceId;
     state.revision = data.currentRevision;
@@ -247,7 +250,14 @@ function applyModeToUi() {
   // commit 按钮只在模板模式下出现，且已定稿后隐藏
   $("btn-commit").hidden = !isTemplate || state.committed;
 
-  for (const id of ["btn-confirm", "btn-promote", "btn-withdraw", "btn-add-section"]) {
+  // 发布按钮：只有「已定稿且未发布」时才出现。
+  // 顺序很重要 —— 草稿没定稿就发布会让版本内容与模板名不一致。
+  $("btn-publish").hidden = !isTemplate || !state.committed || state.published;
+
+  // 「新增分组」两种模式都要有：模板草稿同样需要人工微调结构。
+  // 确认/扶正/撤回是**案件生命周期**动作，模板模式下没有意义。
+  $("btn-add-section").hidden = false;
+  for (const id of ["btn-confirm", "btn-promote", "btn-withdraw"]) {
     $(id).hidden = isTemplate;
   }
   $("btn-new").hidden = false;
@@ -274,8 +284,16 @@ function renderBadges() {
       ? `草稿 ${state.templateVersionId.slice(0, 8)}`
       : "模板草稿";
     const b = $("instance-badge");
-    b.textContent = state.committed ? "已保存为草稿" : "编辑中";
-    b.className = "badge" + (state.committed ? " ok" : " warn");
+    if (state.published) {
+      b.textContent = "已发布";
+      b.className = "badge ok";
+    } else if (state.committed) {
+      b.textContent = "已保存为草稿";
+      b.className = "badge ok";
+    } else {
+      b.textContent = "编辑中";
+      b.className = "badge warn";
+    }
     return;
   }
 
@@ -876,6 +894,7 @@ async function doNewTemplate() {
   state.templateId = null;
   state.templateVersionId = null;
   state.committed = false;
+  state.published = false;
 
   applyModeToUi();
   renderStructure();
@@ -923,6 +942,45 @@ async function doCommit() {
     } else {
       toast(`保存失败：${e.message}`, true);
     }
+  }
+}
+
+/**
+ * 把已定稿的模板草稿**发布**为正式模板。
+ *
+ * 发布是模板生命周期的分水岭：
+ *   - 发布后 currentVersionId 指向该版本，模板状态变为 published
+ *   - 该版本不能再被 AI 或人工编辑器修改（后端会拒绝）
+ * 因此这里要二次确认，把后果说清楚。
+ */
+async function doPublish() {
+  if (state.mode !== "template" || !state.templateId || !state.templateVersionId) {
+    toast("当前没有可发布的模板草稿", true);
+    return;
+  }
+
+  if (
+    !confirm(
+      "发布后这份版本就成为正式模板：\n" +
+        "· 新案件可以直接选用它\n" +
+        "· 该版本不能再修改（要改得新建版本）\n\n确定发布？"
+    )
+  ) {
+    return;
+  }
+
+  try {
+    await api(
+      "POST",
+      `/api/v1/questionnaire-templates/${state.templateId}/versions/${state.templateVersionId}/publish`
+    );
+    state.published = true;
+    applyModeToUi();
+    toast(
+      "已发布为正式模板。\n现在可以在「模板管理」里看到它，也可以用它新建案件了。"
+    );
+  } catch (e) {
+    toast(`发布失败：${e.message}`, true);
   }
 }
 
@@ -1026,6 +1084,7 @@ async function init() {
   $("btn-new").addEventListener("click", doNewInstance);
   $("btn-new-template").addEventListener("click", doNewTemplate);
   $("btn-commit").addEventListener("click", doCommit);
+  $("btn-publish").addEventListener("click", doPublish);
   $("btn-refresh").addEventListener("click", () =>
     refreshStructure().catch((e) => toast(e.message, true))
   );
@@ -1051,5 +1110,8 @@ async function init() {
     }
   });
 }
+
+// 暴露给控制台调试用（只读查看，不承担 API 稳定性）
+window.__dsh = state;
 
 init();

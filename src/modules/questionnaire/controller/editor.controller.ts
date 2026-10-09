@@ -10,6 +10,12 @@
  *   Operation 层从第一天就被约束成纯函数（入参 (schema, input) → 新 schema），
  *   因此「AI 改问卷」与「人改问卷」天然共用同一套实现。
  *
+ * 两套目标、一套操作：
+ *   /questionnaire-instances/{id}/...                        改案件结构
+ *   /questionnaire-templates/{tid}/versions/{vid}/...        改模板草稿结构
+ *   请求体与响应体形状**完全一致**，只有目标不同。
+ *   模板草稿那条路同样只能写 draft 版本（Service 里校验）。
+ *
  * 状态约束（决策 D1）：
  *   已下发的实例结构冻结，人工编辑器同样无法修改
  *   （校验在 Service 的 assertInstanceWritable 里，不在这里重复）。
@@ -23,18 +29,35 @@ import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireService } from "../service/questionnaire.service.js";
 
 // ============================================================
-// 请求 Schema
+// 请求 Schema（两套目标共用 body，params 各自不同）
 // ============================================================
 
 const instanceParams = z.object({ instanceId: z.string().min(1) });
 
-const questionParams = z.object({
+const instanceQuestionParams = z.object({
   instanceId: z.string().min(1),
   questionId: z.string().min(1),
 });
 
-const sectionParams = z.object({
+const instanceSectionParams = z.object({
   instanceId: z.string().min(1),
+  sectionId: z.string().min(1),
+});
+
+const versionParams = z.object({
+  templateId: z.string().min(1),
+  versionId: z.string().min(1),
+});
+
+const versionQuestionParams = z.object({
+  templateId: z.string().min(1),
+  versionId: z.string().min(1),
+  questionId: z.string().min(1),
+});
+
+const versionSectionParams = z.object({
+  templateId: z.string().min(1),
+  versionId: z.string().min(1),
   sectionId: z.string().min(1),
 });
 
@@ -44,7 +67,7 @@ const expectedRevisionSchema = z
   .int()
   .positive()
   .optional()
-  .describe("客户端看到的 currentRevision；不一致则拒绝，避免覆盖他人修改");
+  .describe("客户端看到的版本标识；不一致则拒绝，避免覆盖他人修改");
 
 const optionInput = z.object({
   label: z.string().min(1),
@@ -118,105 +141,179 @@ const deleteQuestionBody = z.object({
   expectedRevision: expectedRevisionSchema,
 });
 
-// ============================================================
-// 公共：把 expectedRevision 组装成 applyToInstance 的 options
-// ============================================================
+type OperationPayload = Parameters<
+  typeof questionnaireService.applyToInstance
+>[1];
 
+/** 把 expectedRevision 转成 Service 的 options（undefined 时不传） */
 function revisionOptions(expectedRevision?: number): {
   expectedRevision?: number;
 } {
   return expectedRevision !== undefined ? { expectedRevision } : {};
 }
 
-/** 写操作的统一返回：新 revision 与本次变更详情（前端据此刷新结构树） */
-// 返回体形状：{ ...本次变更详情, revision }
-// 例如新增分组返回 { section: {...}, revision: 3 }
+/** 人工编辑的审计来源：与 AI 区分开（决策 D3） */
+function editorContext(req: Request, toolName: string) {
+  return {
+    ...serviceContextOf(req),
+    source: "manual_editor" as const,
+    auditToolName: toolName,
+  };
+}
 
 // ============================================================
-// Router
+// payload 构造（两套目标共用）
 // ============================================================
+
+function buildAddSection(body: z.infer<typeof addSectionBody>): OperationPayload {
+  return {
+    name: "add_section",
+    input: {
+      title: body.title,
+      ...(body.description !== undefined
+        ? { description: body.description }
+        : {}),
+    },
+  };
+}
+
+function buildUpdateSection(
+  sectionId: string,
+  body: z.infer<typeof updateSectionBody>
+): OperationPayload {
+  return {
+    name: "update_section",
+    input: {
+      sectionId,
+      ...(body.title !== undefined ? { title: body.title } : {}),
+      ...(body.description !== undefined
+        ? { description: body.description }
+        : {}),
+    },
+  };
+}
+
+function buildAddQuestion(
+  body: z.infer<typeof addQuestionBody>
+): OperationPayload {
+  return {
+    name: "add_question",
+    input: {
+      sectionId: body.sectionId,
+      type: body.type,
+      title: body.title,
+      ...(body.description !== undefined
+        ? { description: body.description }
+        : {}),
+      ...(body.required !== undefined ? { required: body.required } : {}),
+      ...(body.options !== undefined ? { options: body.options } : {}),
+    },
+  };
+}
+
+function buildUpdateQuestion(
+  questionId: string,
+  body: z.infer<typeof updateQuestionBody>
+): OperationPayload {
+  return {
+    name: "update_question",
+    input: {
+      questionId,
+      ...(body.title !== undefined ? { title: body.title } : {}),
+      ...(body.description !== undefined
+        ? { description: body.description }
+        : {}),
+      ...(body.type !== undefined ? { type: body.type } : {}),
+      ...(body.required !== undefined ? { required: body.required } : {}),
+      ...(body.options !== undefined ? { options: body.options } : {}),
+    },
+  };
+}
+
+function buildMoveQuestion(
+  questionId: string,
+  body: z.infer<typeof moveQuestionBody>
+): OperationPayload {
+  return {
+    name: "move_question",
+    input: {
+      questionId,
+      targetSectionId: body.targetSectionId,
+      ...(body.targetOrder !== undefined
+        ? { targetOrder: body.targetOrder }
+        : {}),
+    },
+  };
+}
+
+function buildRemoveQuestion(questionId: string): OperationPayload {
+  return { name: "remove_question", input: { questionId } };
+}
+
+// ============================================================
+// 通用注册：把六个操作挂到一套目标的四个路径上
+// ============================================================
+
+interface TargetSchemas {
+  /** 新增分组 / 新增问题用的 params（只含目标标识） */
+  base: z.ZodTypeAny;
+  /** 带 sectionId 的 params */
+  section: z.ZodTypeAny;
+  /** 带 questionId 的 params */
+  question: z.ZodTypeAny;
+}
 
 /**
- * 人工编辑器路由。
+ * 在给定前缀下注册六个编辑操作。
  *
- * 挂在 /questionnaire-instances 之下（与实例详情同一前缀），
- * 因此调用方看到的路径是 /api/v1/questionnaire-instances/{id}/...
+ * 之所以抽成一个函数：两套目标（实例 / 模板版本）的操作集合、
+ * 请求体、响应体完全相同，只有「目标怎么取」不同。
+ * 手写两遍容易出现两边行为漂移。
  */
-export function createEditorRouter(): Router {
-  const router = Router();
-
-  const apply = async (
+function registerOperations(
+  router: Router,
+  prefix: string,
+  schemas: TargetSchemas,
+  resolve: (req: Request) => {
+    apply: (
+      payload: OperationPayload,
+      expectedRevision?: number
+    ) => Promise<{ details: Record<string, unknown>; revision: number }>;
+  }
+): void {
+  const run = async (
     req: Request,
     res: Response,
-    payload: Parameters<
-      typeof questionnaireService.applyToInstance
-    >[1],
+    payload: OperationPayload,
     expectedRevision?: number
   ): Promise<void> => {
-    const { instanceId } = req.params as z.infer<typeof instanceParams>;
-
-    const result = await questionnaireService.applyToInstance(
-      instanceId,
-      payload,
-      {
-        ...serviceContextOf(req),
-        // 人工编辑也要留痕，来源区分于 AI（决策 D3）
-        source: "manual_editor",
-        auditToolName: payload.name,
-      },
-      revisionOptions(expectedRevision)
-    );
-
-    sendSuccess(req, res, {
-      ...result.details,
-      revision: result.revision,
-    });
+    const { apply } = resolve(req);
+    const result = await apply(payload, expectedRevision);
+    // 响应体形状：{ ...本次变更详情, revision }
+    sendSuccess(req, res, { ...result.details, revision: result.revision });
   };
 
   // ---- 新增分组 ----
   router.post(
-    "/:instanceId/sections",
-    validate({ params: instanceParams, body: addSectionBody }),
+    `${prefix}/sections`,
+    validate({ params: schemas.base, body: addSectionBody }),
     asyncHandler(async (req, res) => {
       const body = req.body as z.infer<typeof addSectionBody>;
-      await apply(
-        req,
-        res,
-        {
-          name: "add_section",
-          input: {
-            title: body.title,
-            ...(body.description !== undefined
-              ? { description: body.description }
-              : {}),
-          },
-        },
-        body.expectedRevision
-      );
+      await run(req, res, buildAddSection(body), body.expectedRevision);
     })
   );
 
   // ---- 修改分组 ----
   router.patch(
-    "/:instanceId/sections/:sectionId",
-    validate({ params: sectionParams, body: updateSectionBody }),
+    `${prefix}/sections/:sectionId`,
+    validate({ params: schemas.section, body: updateSectionBody }),
     asyncHandler(async (req, res) => {
-      const { sectionId } = req.params as z.infer<typeof sectionParams>;
+      const { sectionId } = req.params as { sectionId: string };
       const body = req.body as z.infer<typeof updateSectionBody>;
-
-      await apply(
+      await run(
         req,
         res,
-        {
-          name: "update_section",
-          input: {
-            sectionId,
-            ...(body.title !== undefined ? { title: body.title } : {}),
-            ...(body.description !== undefined
-              ? { description: body.description }
-              : {}),
-          },
-        },
+        buildUpdateSection(sectionId, body),
         body.expectedRevision
       );
     })
@@ -224,29 +321,27 @@ export function createEditorRouter(): Router {
 
   // ---- 新增问题 ----
   router.post(
-    "/:instanceId/questions",
-    validate({ params: instanceParams, body: addQuestionBody }),
+    `${prefix}/questions`,
+    validate({ params: schemas.base, body: addQuestionBody }),
     asyncHandler(async (req, res) => {
       const body = req.body as z.infer<typeof addQuestionBody>;
+      await run(req, res, buildAddQuestion(body), body.expectedRevision);
+    })
+  );
 
-      await apply(
+  // ---- 移动问题 ----
+  // 注册在「修改问题」之前：路径段数不同不会冲突，
+  // 但先注册更长的路径可读性更好（也避免将来改成前缀匹配时出错）。
+  router.patch(
+    `${prefix}/questions/:questionId/move`,
+    validate({ params: schemas.question, body: moveQuestionBody }),
+    asyncHandler(async (req, res) => {
+      const { questionId } = req.params as { questionId: string };
+      const body = req.body as z.infer<typeof moveQuestionBody>;
+      await run(
         req,
         res,
-        {
-          name: "add_question",
-          input: {
-            sectionId: body.sectionId,
-            type: body.type,
-            title: body.title,
-            ...(body.description !== undefined
-              ? { description: body.description }
-              : {}),
-            ...(body.required !== undefined
-              ? { required: body.required }
-              : {}),
-            ...(body.options !== undefined ? { options: body.options } : {}),
-          },
-        },
+        buildMoveQuestion(questionId, body),
         body.expectedRevision
       );
     })
@@ -254,56 +349,15 @@ export function createEditorRouter(): Router {
 
   // ---- 修改问题 ----
   router.patch(
-    "/:instanceId/questions/:questionId",
-    validate({ params: questionParams, body: updateQuestionBody }),
+    `${prefix}/questions/:questionId`,
+    validate({ params: schemas.question, body: updateQuestionBody }),
     asyncHandler(async (req, res) => {
-      const { questionId } = req.params as z.infer<typeof questionParams>;
+      const { questionId } = req.params as { questionId: string };
       const body = req.body as z.infer<typeof updateQuestionBody>;
-
-      await apply(
+      await run(
         req,
         res,
-        {
-          name: "update_question",
-          input: {
-            questionId,
-            ...(body.title !== undefined ? { title: body.title } : {}),
-            ...(body.description !== undefined
-              ? { description: body.description }
-              : {}),
-            ...(body.type !== undefined ? { type: body.type } : {}),
-            ...(body.required !== undefined
-              ? { required: body.required }
-              : {}),
-            ...(body.options !== undefined ? { options: body.options } : {}),
-          },
-        },
-        body.expectedRevision
-      );
-    })
-  );
-
-  // ---- 移动问题 ----
-  router.patch(
-    "/:instanceId/questions/:questionId/move",
-    validate({ params: questionParams, body: moveQuestionBody }),
-    asyncHandler(async (req, res) => {
-      const { questionId } = req.params as z.infer<typeof questionParams>;
-      const body = req.body as z.infer<typeof moveQuestionBody>;
-
-      await apply(
-        req,
-        res,
-        {
-          name: "move_question",
-          input: {
-            questionId,
-            targetSectionId: body.targetSectionId,
-            ...(body.targetOrder !== undefined
-              ? { targetOrder: body.targetOrder }
-              : {}),
-          },
-        },
+        buildUpdateQuestion(questionId, body),
         body.expectedRevision
       );
     })
@@ -311,19 +365,96 @@ export function createEditorRouter(): Router {
 
   // ---- 删除问题 ----
   router.delete(
-    "/:instanceId/questions/:questionId",
-    validate({ params: questionParams, body: deleteQuestionBody.optional() }),
+    `${prefix}/questions/:questionId`,
+    validate({ params: schemas.question, body: deleteQuestionBody.optional() }),
     asyncHandler(async (req, res) => {
-      const { questionId } = req.params as z.infer<typeof questionParams>;
+      const { questionId } = req.params as { questionId: string };
       const body = (req.body ?? {}) as z.infer<typeof deleteQuestionBody>;
-
-      await apply(
+      await run(
         req,
         res,
-        { name: "remove_question", input: { questionId } },
+        buildRemoveQuestion(questionId),
         body.expectedRevision
       );
     })
+  );
+}
+
+// ============================================================
+// 实例编辑器
+// ============================================================
+
+/**
+ * 实例编辑器路由，挂在 /questionnaire-instances 之下：
+ *   /api/v1/questionnaire-instances/{id}/sections ...
+ */
+export function createEditorRouter(): Router {
+  const router = Router();
+
+  registerOperations(
+    router,
+    "/:instanceId",
+    {
+      base: instanceParams,
+      section: instanceSectionParams,
+      question: instanceQuestionParams,
+    },
+    (req) => {
+      const { instanceId } = req.params as z.infer<typeof instanceParams>;
+      return {
+        apply: async (payload, expectedRevision) => {
+          const r = await questionnaireService.applyToInstance(
+            instanceId,
+            payload,
+            editorContext(req, payload.name),
+            revisionOptions(expectedRevision)
+          );
+          return { details: r.details, revision: r.revision };
+        },
+      };
+    }
+  );
+
+  return router;
+}
+
+// ============================================================
+// 模板草稿编辑器
+// ============================================================
+
+/**
+ * 模板草稿编辑器路由，挂在 /questionnaire-templates 之下：
+ *   /api/v1/questionnaire-templates/{tid}/versions/{vid}/sections ...
+ *
+ * 有了它，「从零创建问卷」之后可以像改案件一样手工微调结构 ——
+ * 这正是决策 D3 要的兜底能力（AI 改得不合适时人还能直接改）。
+ * 只有 draft 版本可写，发布后的版本会被 Service 拒绝。
+ */
+export function createTemplateEditorRouter(): Router {
+  const router = Router();
+
+  registerOperations(
+    router,
+    "/:templateId/versions/:versionId",
+    {
+      base: versionParams,
+      section: versionSectionParams,
+      question: versionQuestionParams,
+    },
+    (req) => {
+      const { versionId } = req.params as z.infer<typeof versionParams>;
+      return {
+        apply: async (payload, expectedRevision) => {
+          const r = await questionnaireService.applyToTemplateVersion(
+            versionId,
+            payload,
+            editorContext(req, payload.name),
+            revisionOptions(expectedRevision)
+          );
+          return { details: r.details, revision: r.revision };
+        },
+      };
+    }
   );
 
   return router;

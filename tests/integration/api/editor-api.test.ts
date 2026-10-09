@@ -548,3 +548,164 @@ describe("人工编辑器：与 AI 通道一致的约束", () => {
     expect(write.status).toBe(403);
   });
 });
+
+// ============================================================
+// 模板草稿编辑器
+//
+// 「从零创建问卷」之后，AI 建的结构要能像案件一样人工微调 ——
+// 这是决策 D3 要的兜底能力。模板草稿的编辑端点与实例端点共用
+// 同一套 Service 与 Operation 层，因此规则也应一致。
+// ============================================================
+
+describe("人工编辑器：模板草稿", () => {
+  /** 建一个模板 + 空草稿版本 */
+  async function makeDraft(): Promise<{ templateId: string; versionId: string }> {
+    const t = await apiRequest<{ id: string }>(
+      client,
+      "POST",
+      "/api/v1/questionnaire-templates",
+      { userId: USERS.admin, body: { name: `模板编辑器-${newId().slice(0, 8)}` } }
+    );
+    const templateId = expectData<{ id: string }>(t).id;
+    createdTemplateIds.add(templateId);
+
+    const v = await apiRequest<{ id: string }>(
+      client,
+      "POST",
+      `/api/v1/questionnaire-templates/${templateId}/versions`,
+      { userId: USERS.admin, body: {} }
+    );
+    return { templateId, versionId: expectData<{ id: string }>(v).id };
+  }
+
+  const base = (t: string, v: string) =>
+    `/api/v1/questionnaire-templates/${t}/versions/${v}`;
+
+  it("可以往模板草稿里加分组与题目（中文往返）", async () => {
+    const { templateId, versionId } = await makeDraft();
+
+    const sec = await apiRequest(
+      client, "POST", `${base(templateId, versionId)}/sections`,
+      { userId: USERS.admin, body: { title: "活动轨迹" } }
+    );
+    expect(sec.status).toBe(200);
+    const secData = expectData<{ section: { id: string; title: string } }>(sec);
+    expect(secData.section.title).toBe("活动轨迹");
+
+    const q = await apiRequest(
+      client, "POST", `${base(templateId, versionId)}/questions`,
+      {
+        userId: USERS.admin,
+        body: {
+          sectionId: secData.section.id,
+          type: "single_choice",
+          title: "最近半年是否离开过本市？",
+          required: true,
+          options: [{ label: "是" }, { label: "否" }],
+        },
+      }
+    );
+    expect(q.status).toBe(200);
+    expect(
+      expectData<{ question: { title: string } }>(q).question.title
+    ).toBe("最近半年是否离开过本市？");
+
+    const v = await prisma.questionnaireTemplateVersion.findUnique({
+      where: { id: versionId },
+      select: { schema: true },
+    });
+    const sections = (v?.schema as { sections: { title: string }[] }).sections;
+    expect(sections.map((s) => s.title)).toContain("活动轨迹");
+  });
+
+  it("可以修改、移动、删除模板草稿里的题目", async () => {
+    const { templateId, versionId } = await makeDraft();
+    const b = base(templateId, versionId);
+
+    const s1 = await apiRequest(
+      client, "POST", `${b}/sections`, { userId: USERS.admin, body: { title: "组A" } }
+    );
+    const s2 = await apiRequest(
+      client, "POST", `${b}/sections`, { userId: USERS.admin, body: { title: "组B" } }
+    );
+    const sid1 = expectData<{ section: { id: string } }>(s1).section.id;
+    const sid2 = expectData<{ section: { id: string } }>(s2).section.id;
+
+    const q = await apiRequest(
+      client, "POST", `${b}/questions`,
+      { userId: USERS.admin, body: { sectionId: sid1, type: "text", title: "题1" } }
+    );
+    const qid = expectData<{ question: { id: string } }>(q).question.id;
+
+    const up = await apiRequest(
+      client, "PATCH", `${b}/questions/${qid}`,
+      { userId: USERS.admin, body: { title: "题1-改名" } }
+    );
+    expect(up.status).toBe(200);
+
+    const mv = await apiRequest(
+      client, "PATCH", `${b}/questions/${qid}/move`,
+      { userId: USERS.admin, body: { targetSectionId: sid2, targetOrder: 1 } }
+    );
+    expect(mv.status).toBe(200);
+
+    const rm = await apiRequest(
+      client, "DELETE", `${b}/questions/${qid}`, { userId: USERS.admin }
+    );
+    expect(rm.status).toBe(200);
+
+    const v = await prisma.questionnaireTemplateVersion.findUnique({
+      where: { id: versionId },
+      select: { schema: true },
+    });
+    const sections = (v?.schema as {
+      sections: { id: string; questions: unknown[] }[];
+    }).sections;
+    expect(sections.find((x) => x.id === sid2)?.questions ?? []).toHaveLength(0);
+  });
+
+  it("已发布的版本不能再改 → 403（与 AI 通道一致）", async () => {
+    const { templateId, versionId } = await makeDraft();
+    const b = base(templateId, versionId);
+
+    // 先加一个分组，否则空结构发布会过不了结构校验
+    await apiRequest(client, "POST", `${b}/sections`, {
+      userId: USERS.admin,
+      body: { title: "组" },
+    });
+    await apiRequest(
+      client,
+      "POST",
+      `/api/v1/questionnaire-templates/${templateId}/versions/${versionId}/publish`,
+      { userId: USERS.admin }
+    );
+
+    const res = await apiRequest(
+      client, "POST", `${b}/sections`,
+      { userId: USERS.admin, body: { title: "发布后不该能加" } }
+    );
+    expect(res.status).toBe(403);
+    expect(res.body.error?.code).toBe("PERMISSION_DENIED");
+  });
+
+  it("非模板管理员不能改模板草稿 → 403", async () => {
+    const { templateId, versionId } = await makeDraft();
+
+    const res = await apiRequest(
+      client, "POST", `${base(templateId, versionId)}/sections`,
+      { userId: USERS.dispatcher, body: { title: "下发员不该能加" } }
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("版本不存在 → 404", async () => {
+    const res = await apiRequest(
+      client,
+      "POST",
+      `/api/v1/questionnaire-templates/${newId()}/versions/${newId()}/sections`,
+      { userId: USERS.admin, body: { title: "x" } }
+    );
+    expect(res.status).toBe(404);
+    expect(res.body.error?.code).toBe("TEMPLATE_VERSION_NOT_FOUND");
+  });
+});

@@ -12,7 +12,7 @@
  *       与 questionnaire-responses/...，无法放在同一个子前缀下）
  */
 import { Router } from "express";
-import { createTemplateRouter } from "../modules/questionnaire/controller/template.controller.js";
+import { createTemplateRouterWithEditor } from "../modules/questionnaire/controller/template.controller.js";
 import { createInstanceRouterWithEditor } from "../modules/questionnaire/controller/instance.controller.js";
 import { createAiRouter } from "../modules/ai/routes.js";
 import { createDispatchRouter } from "../modules/dispatch/routes.js";
@@ -22,7 +22,7 @@ import { createReviewRouter } from "../modules/review/routes.js";
 export function createApiRouter(): Router {
   const router = Router();
 
-  router.use("/questionnaire-templates", createTemplateRouter());
+  router.use("/questionnaire-templates", createTemplateRouterWithEditor());
   router.use("/questionnaire-instances", createInstanceRouterWithEditor());
   router.use("/ai", createAiRouter());
 

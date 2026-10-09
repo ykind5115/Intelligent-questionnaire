@@ -150,6 +150,109 @@ export const templateService = {
     return found;
   },
 
+  /**
+   * 更新模板的名称 / 描述（模板管理页的「保存」按钮）。
+   *
+   * 只允许改这两个展示字段：
+   *   - 结构属于**版本**，改结构必须新建版本，不能在这里偷偷改
+   *   - 状态由 publish / disable 流程控制，不接受客户端直接指定
+   * 这样模板记录始终只是「元信息」，不承载结构真相。
+   */
+  async updateTemplate(
+    templateId: string,
+    input: { name?: string; description?: string | null },
+    ctx: ServiceContext
+  ): Promise<TemplateRow> {
+    assertTemplateAdmin(ctx);
+
+    if (input.name === undefined && input.description === undefined) {
+      throw validationError("至少要提供 name 或 description 之一", {
+        path: "name",
+      });
+    }
+
+    const name = input.name?.trim();
+    if (input.name !== undefined && !name) {
+      throw validationError("模板名称不能为空", { path: "name" });
+    }
+
+    // 先确认存在（getTemplate 会抛 TEMPLATE_NOT_FOUND）
+    await this.getTemplate(templateId);
+
+    return prisma.questionnaireTemplate.update({
+      where: { id: templateId },
+      data: {
+        ...(name !== undefined ? { name } : {}),
+        ...(input.description !== undefined
+          ? { description: input.description }
+          : {}),
+      },
+    });
+  },
+
+  /**
+   * 删除模板（连同其所有版本）。
+   *
+   * 安全约束（重要）：**已有实例引用了它的版本时不允许删除**。
+   *   questionnaire_instances.template_version_id 指向版本，
+   *   删掉会让既有案件失去溯源依据（「这份问卷当初照哪个模板做的」）。
+   *   必须显式拦住，而不是靠数据库外键抛一个难以理解的错误。
+   *
+   * 已发布的模板同样不允许直接删除：先 disable，
+   * 避免正在被使用的模板突然消失。
+   */
+  async deleteTemplate(
+    templateId: string,
+    ctx: ServiceContext
+  ): Promise<{ id: string; deletedVersions: number }> {
+    assertTemplateAdmin(ctx);
+
+    const template = await this.getTemplate(templateId);
+
+    if (template.status === "published") {
+      throw new OperationError(
+        ErrorCode.INVALID_STATUS_TRANSITION,
+        "已发布的模板不能直接删除。请先停用它（disable），确认无人使用后再删。",
+        { path: "status", status: template.status }
+      );
+    }
+
+    return transaction(async (tx: Tx) => {
+      const versions = await tx.questionnaireTemplateVersion.findMany({
+        where: { templateId },
+        select: { id: true },
+      });
+      const versionIds = versions.map((v) => v.id);
+
+      if (versionIds.length > 0) {
+        const usedBy = await tx.questionnaireInstance.count({
+          where: { templateVersionId: { in: versionIds } },
+        });
+        if (usedBy > 0) {
+          throw new OperationError(
+            ErrorCode.INVALID_STATUS_TRANSITION,
+            `该模板的版本已被 ${usedBy} 个问卷实例引用，不能删除` +
+              "（删除会让既有案件失去来源依据）。",
+            { path: "templateId", usedByInstances: usedBy }
+          );
+        }
+
+        await tx.questionnaireTemplateVersion.deleteMany({
+          where: { templateId },
+        });
+      }
+
+      // current_version_id 是模板指向版本的循环外键，必须先断开
+      await tx.questionnaireTemplate.update({
+        where: { id: templateId },
+        data: { currentVersionId: null },
+      });
+      await tx.questionnaireTemplate.delete({ where: { id: templateId } });
+
+      return { id: templateId, deletedVersions: versionIds.length };
+    });
+  },
+
   // ----------------------------------------------------------
   // 模板版本
   // ----------------------------------------------------------
@@ -407,6 +510,22 @@ export const templateService = {
         await tx.questionnaireTemplate.update({
           where: { id: templateId },
           data: { currentVersionId: null },
+        });
+      }
+
+      // ---- 同步模板状态，避免出现「已发布却没有任何可用版本」 ----
+      //
+      // 原先只停用版本、清空 currentVersionId，却不改模板 status，
+      // 于是模板会一直显示「已发布」，但既没有可用版本、也删不掉
+      // （删除被「已发布不能删」拦住），用户被卡在中间没有任何出路。
+      // 现在：没有任何已发布版本时，模板状态降为 disabled。
+      const stillPublished = await tx.questionnaireTemplateVersion.count({
+        where: { templateId, status: "published" },
+      });
+      if (stillPublished === 0 && template?.status === "published") {
+        await tx.questionnaireTemplate.update({
+          where: { id: templateId },
+          data: { status: "disabled" },
         });
       }
 

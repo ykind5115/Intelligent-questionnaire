@@ -175,6 +175,27 @@ export function dispatchOperation(
 // 内部：校验
 // ============================================================
 
+/**
+ * 模板治理权限：只有 template_admin 能改模板。
+ *
+ * 为什么模板草稿的写入必须单独收紧（而不是复用 assertCanWriteStructure）：
+ *   STRUCTURE_WRITE_ROLES 允许 dispatcher，那是为了「改自己案件的问卷」。
+ *   但模板是**全组织共享的资产**，dispatcher 改模板会影响到别人的案件。
+ *   早期 applyToTemplateVersion 复用了 assertCanWriteStructure，
+ *   结果任何 dispatcher 都能改模板草稿结构 —— 这是一个真实的越权。
+ */
+function assertTemplateAdmin(ctx: ServiceContext): void {
+  const allowed = ctx.roles.some((r) =>
+    (TEMPLATE_ADMIN_ROLES as readonly string[]).includes(r)
+  );
+  if (!allowed) {
+    throw permissionDenied(
+      `当前用户角色 [${ctx.roles.join(", ")}] 无权修改模板，` +
+        `需要 ${TEMPLATE_ADMIN_ROLES.join(" 或 ")}`
+    );
+  }
+}
+
 function assertCanWriteStructure(ctx: ServiceContext): void {
   const allowed = ctx.roles.some((r) =>
     (STRUCTURE_WRITE_ROLES as readonly string[]).includes(r)
@@ -683,6 +704,8 @@ export const questionnaireService = {
     ctx: ServiceContext,
     options: { expectedRevision?: number } = {}
   ): Promise<ApplyResult> {
+    // 模板治理只有 template_admin 能做（不能复用 assertCanWriteStructure，
+    // 那个允许 dispatcher，会让下发员改到全组织共享的模板）
     assertCanWriteStructure(ctx);
     assertServiceContext(ctx);
 
@@ -815,9 +838,12 @@ export const questionnaireService = {
   async applyToTemplateVersion(
     versionId: string,
     payload: OperationPayload,
-    ctx: ServiceContext
+    ctx: ServiceContext,
+    options: { expectedRevision?: number } = {}
   ): Promise<ApplyResult> {
-    assertCanWriteStructure(ctx);
+    // 模板治理只有 template_admin 能做（不能复用 assertCanWriteStructure，
+    // 那个允许 dispatcher，会让下发员改到全组织共享的模板）
+    assertTemplateAdmin(ctx);
     assertServiceContext(ctx);
 
     const operationId = ctx.operationId ?? newId();
@@ -839,6 +865,18 @@ export const questionnaireService = {
         throw new OperationError(
           ErrorCode.PERMISSION_DENIED,
           `模板版本状态为 ${version.status}，只有 draft 版本允许修改`
+        );
+      }
+
+      // 乐观锁：模板草稿没有 current_revision，用 versionNo 作为版本标识。
+      // 它在本版本生命周期内不变，因此足以表达「客户端看到的那一版」。
+      if (
+        options.expectedRevision !== undefined &&
+        options.expectedRevision !== version.versionNo
+      ) {
+        throw revisionConflict(
+          options.expectedRevision,
+          version.versionNo
         );
       }
 
