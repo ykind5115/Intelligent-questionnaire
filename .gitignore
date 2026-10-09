@@ -9,6 +9,9 @@ generated/
 .env
 .env.local
 .env.*.local
+# .env 的备份（切换数据库/模型配置时产生的）
+.env.bak*
+.env.backup*
 
 # 日志
 *.log

@@ -24,7 +24,7 @@ AI 辅助的问卷生成与动态编排系统。用自然语言描述调查需�
 | 语言 | TypeScript 5.9（strict） | ESM + NodeNext，相对导入需带 `.js` |
 | 运行时 | Node.js ≥ 22 | |
 | Web | Express 5 | |
-| 数据库 | PostgreSQL | 本地开发用 `prisma dev` 提供的实例 |
+| 数据库 | PostgreSQL 17 | 本机安装或 Docker 均可 |
 | ORM | Prisma 7.10.0（锁定版本） | 经 `@prisma/adapter-pg` 走驱动适配器 |
 | 校验 | Zod 4 | 同一套 Schema 复用于 AI 参数、HTTP 请求、结构定义 |
 | 测试 | Vitest 3 | 集成测试直连真实数据库 |
@@ -56,7 +56,11 @@ AI 辅助的问卷生成与动态编排系统。用自然语言描述调查需�
 
 - Node.js ≥ 22
 - pnpm
-- 不需要自己装 PostgreSQL：`prisma dev` 会提供一个免安装的本地实例
+- **PostgreSQL**（本机已装 17.x；也可以用 Docker 或远程实例）
+
+> 早期版本用 `prisma dev` 提供的免安装 Postgres，但那个 shim 在高并发下不稳定
+> （会出现 `ConnectionClosed` / `ECONNRESET`，集成测试整片失败、跑一遍要 4 分钟）。
+> 换成真实 PostgreSQL 后同样的 257 例测试只需约 50 秒，且不再抖动。
 
 ### 安装与初始化
 
@@ -75,36 +79,32 @@ pnpm install
 ```bash
 # 2. 准备环境变量
 cp .env.example .env
-
-# 3. 启动本地数据库（后台运行）
-pnpm exec prisma dev -d
-
-# 4. 查看直连地址，填进 .env 的 DATABASE_URL
-pnpm exec prisma dev ls
 ```
 
-把输出的**直连 TCP 地址**填进 `.env`：
+把数据库连接串填进 `.env` 的 `DATABASE_URL`（本机 PostgreSQL 示例）：
 
 ```text
-postgres://postgres:postgres@localhost:51214/template1?sslmode=disable
+postgresql://postgres:123456@localhost:5432/postgres
 ```
 
-> 注意：**不要用 `prisma+postgres://` 代理地址**。迁移需要 shadow database，
-> 代理地址不支持。
-
 ```bash
-# 5. 建表并生成客户端
-pnpm db:push
+# 3. 建表（按 prisma/migrations 里的迁移历史建，不会重置已有数据）
+pnpm db:deploy
+
+# 4. 生成 Prisma 客户端
 pnpm db:generate
 
-# 6. 写入测试数据（会打印 4 个账号的 UUID）
+# 5. 写入测试数据（会打印 4 个账号的 UUID）
 pnpm db:seed
 
-# 7. 启动服务
+# 6. 启动服务
 pnpm dev            # → http://127.0.0.1:3000
 ```
 
 打开 **http://127.0.0.1:3000** 就是工作台页面。
+
+> **首次建表用 `pnpm db:deploy` 而不是 `db:migrate`**：前者严格按已有迁移历史执行，
+> 适合「库是空的、迁移文件已存在」的场景；后者会在检测到 drift 时要求重置数据库。
 
 ### 常用命令
 
@@ -113,8 +113,10 @@ pnpm dev            # 开发模式（tsx watch）
 pnpm build          # 编译到 dist/
 pnpm start          # 跑编译产物
 pnpm typecheck      # 类型检查
-pnpm test           # 全量测试
+pnpm test           # 全量测试（约 50 秒）
 pnpm test:watch
+pnpm db:deploy      # 应用迁移（生产/首次建表）
+pnpm db:migrate     # 开发时改完 schema 生成新迁移
 pnpm db:studio      # 图形化查看数据
 pnpm db:reset       # 清空并重新迁移（会丢数据）
 pnpm lint / pnpm format
@@ -144,7 +146,7 @@ pnpm db:seed
 |---|---|---|
 | `NODE_ENV` | `development` | `production` 时强制要求真实鉴权与 `AI_BASE_URL` |
 | `PORT` | `3000` | |
-| `DATABASE_URL` | 无（必填） | `prisma dev` 会打印这个值 |
+| `DATABASE_URL` | 无（必填） | PostgreSQL 连接串，例如 `postgresql://postgres:123456@localhost:5432/postgres` |
 | `AI_BASE_URL` | 空 | **生产环境必填**（决策 D13）。必须是 **OpenAI 兼容**根地址，见下方注意事项 |
 | `AI_API_KEY` | 空 | 没有它就只能用假 Provider 跑测试 |
 | `AI_MODEL` | `deepseek-flash` | 决策 D12；也可用 `deepseek-v4-pro` |
@@ -426,20 +428,31 @@ pnpm test:watch
   状态机、SSE 事件协议。**不用 mock 数据库**：本项目最容易出问题的恰恰是
   并发与事务边界，mock 掉就测不出来了。
 
-### 关于本地数据库的坑
+### 数据库选型的一段教训
 
-`prisma dev` 提供的 Postgres 是个**开发用 shim**，在高并发下不稳定，
-会出现 `ConnectionClosed` / `ECONNRESET` / `bind message supplies N parameters`
-之类的报错，导致集成测试整片失败。此时按顺序恢复：
+早期用 `prisma dev` 提供的免安装 Postgres 做本地开发，那是个**开发用 shim**，
+在高并发下不稳定，会出现 `ConnectionClosed` / `ECONNRESET` /
+`bind message supplies N parameters` 之类的报错，导致集成测试整片失败。
+当时的应对是反复重启它：
 
 ```bash
 pnpm exec prisma dev stop default
 pnpm exec prisma dev start default
 ```
 
-注意 `prisma dev -d` 有时不足以恢复。另外这个 shim 忽略数据库名
-（所有数据都落在 `template1`），因此**不适合多套环境并存**，
-迁内网时请优先换成真实 PostgreSQL。
+**现在已改为真实 PostgreSQL**（本机安装或 Docker 均可）。
+换成真实 PG 后：
+
+```text
+全量 257 例测试      248 秒（shim，且经常崩）  →  约 50 秒（真实 PG，稳定）
+集成测试通过率        经常整片失败              →  连续全绿
+```
+
+这印证了一件事：**不要用近似实现去跑并发与事务相关的测试** ——
+被 shim 掩盖或伪造出来的失败，会浪费大量时间去排查并不存在的问题。
+
+如果仍然想用 `prisma dev`，请注意它忽略数据库名（所有数据都落在 `template1`），
+且端口是随机的。
 
 ## AI 评测（决策 D5）
 
@@ -474,7 +487,8 @@ CI 里用假 Provider 驱动，得到全绿只能证明**评测器与业务链�
 
 诚实列出，避免误判完成度：
 
-- **本地数据库不适合压测**，见上文 `prisma dev` 的坑。
+- 数据库现在是真实 PostgreSQL，可以正常压测；但连接池上限是 5（`POOL_MAX`），
+  高并发压测前需要先调大。
 - 前端是**最小可用**版本，没有回答填写界面与审核界面，
   这两步目前只能走 API。
 - 前端不做乐观更新：写操作失败后会重新拉取结构，
@@ -504,8 +518,8 @@ CI 里用假 Provider 驱动，得到全绿只能证明**评测器与业务链�
    删掉它安装会直接失败。
 2. **`DATABASE_URL` 必须用直连 TCP 地址**：`prisma+postgres://` 代理地址无法用于迁移
    （shadow database 不支持）。
-3. **`prisma dev` 的端口是随机的**：换环境后需要重新
-   `pnpm exec prisma dev ls` 并更新 `.env`。
+3. **`DATABASE_URL` 必须指向真实可用的 PostgreSQL**；若换机器/换库，
+   记得重新 `pnpm db:deploy` 建表与 `pnpm db:seed` 灌数据。
 4. **`.env` 与 `generated/` 都不提交 Git**：真实密钥不入库；
    Prisma 客户端由 `pnpm db:generate` 生成，模板见 `.env.example`。
 
