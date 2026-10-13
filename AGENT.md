@@ -1,0 +1,326 @@
+# AGENT.md
+
+给在本仓库工作的 AI 编码代理的约定。
+
+> 人类读者看 [README.md](README.md)；本文件只讲**怎么在这个仓库里干活**。
+
+---
+
+## 0. 分工边界（最重要，先读这条）
+
+| 事项 | 谁做 |
+| --- | --- |
+| 写代码、改配置、加测试 | **代理** |
+| 分析需求、查文档、设计取舍 | **代理** |
+| 排查缺陷、给修复方案 | **代理** |
+| 提交到本地 git（`git add` + `git commit`） | **代理** |
+| **启动/停止服务**（`pnpm dev` 等长驻进程） | **用户** |
+| **`git push` / 建 PR / 打 tag** | **用户** |
+| 数据库迁移到新环境、改 `.env` 里的密钥 | **用户** |
+
+**为什么这样分：**
+
+- **启动服务**：代理启动的长驻进程会在会话结束后变成孤儿进程占着端口，
+  或者被会话清理时连带杀掉。历史上这已经造成过多次困扰
+  （代理起的 `pnpm dev` 用户找不到在哪儿关，只能让代理去杀）。
+  需要验证运行时行为时，**请用户先启动**，或代理用「起一个临时进程、
+  验证完立刻自己杀掉」的方式，并在回复里说明。
+- **推送提交**：用户要自己审一遍 diff、决定什么时候推、推到哪个远端。
+  代理只负责把改动整理成一次干净的本地提交。
+
+**代理不要做的事：**
+
+- 不要 `git push`、不要 `git commit --amend` 已推送的提交、不要 `git rebase` 公共分支
+- 不要执行破坏性操作（`git reset --hard`、`git clean -fd`、删库重来）除非用户明确要求
+- 不要为了让测试通过而删掉/跳过失败用例 —— 见第 5 节
+
+---
+
+## 1. 技术栈与硬约束
+
+| 项 | 约束 |
+| --- | --- |
+| 语言 | TypeScript 5.9，`strict` |
+| 模块 | ESM + NodeNext —— **相对导入必须带 `.js` 后缀** |
+| 运行时 | Node.js ≥ 22 |
+| Web | Express 5 |
+| 数据库 | PostgreSQL 17（本机安装；已不再用 `prisma dev`） |
+| ORM | Prisma **7.10.0，版本锁定**，经 `@prisma/adapter-pg` |
+| 校验 | Zod 4（同一套 schema 复用于 HTTP 请求、AI 工具参数、结构定义） |
+| 测试 | Vitest 3，集成测试**直连真实数据库** |
+
+Prisma 7 的几个坑（别踩第二次）：
+
+- `datasource` 里**不写 `url`**，连接串在 `prisma7.config.ts` 里通过
+  `defineConfig` 提供，且该文件必须 `import "dotenv/config"`（Prisma 不会自动加载 `.env`）
+- generator 是 `prisma-client`（不是 `prisma-client-js`），产物输出到 `generated/prisma`，
+  导入路径是 `generated/prisma/client.js`（层级按文件位置调整，
+  例如 `src/modules/ai/service/` 下是 `../../../../generated/prisma/client.js`），
+  **不是** `@prisma/client`
+- 运行时需要 `@prisma/adapter-pg`
+- CLI 不再接受 `--url`
+
+---
+
+## 2. 常用命令
+
+```bash
+pnpm typecheck      # 类型检查 —— 改完代码必须跑
+pnpm test           # 全量测试（约 55 秒，需要数据库在跑）
+pnpm dev            # 启动服务（★ 由用户执行，见第 0 节）
+
+pnpm db:deploy      # 应用迁移（首次建表 / 生产）
+pnpm db:migrate     # 改完 schema 生成新迁移
+pnpm db:generate    # 重新生成 Prisma 客户端
+pnpm db:seed        # 灌测试数据（会打印 4 个测试账号的 UUID）
+pnpm db:studio      # 图形化看数据
+pnpm db:reset       # 清空重建（会丢数据）
+```
+
+**`package.json` 里的 `lint` / `format` 目前是坏的** —— 脚本引用了
+`eslint` / `prettier`，但这两个包不在 `devDependencies` 里，执行会报
+`'eslint' is not recognized`。要么先 `pnpm add -D` 装上并补配置文件，
+要么别执行这两个脚本。**不要假装它们能跑。**
+
+质量门禁只有两条：`pnpm typecheck` 和 `pnpm test`。
+
+---
+
+## 3. 代码与提交规范
+
+### 命名与注释
+
+- 代码标识符用英文；**注释与文档用中文**（与现有代码一致）
+- 注释解释**为什么**，不解释**是什么**。例如：
+  - ✅ `// 乐观锁：确认的必须是客户端「看到的那一版」`
+  - ❌ `// 更新实例状态`
+- 遇到非显而易见的取舍、踩过的坑、有意的简化，都要在注释里写清原因
+
+### 架构分层（不要打破）
+
+```text
+Controller → Service → Operation（纯函数）
+                    ↘ Repository → 数据库
+```
+
+1. **只有 Repository 能碰数据库**。Service 里不出现 `prisma.xxx`
+2. **Operation 必须是纯函数**：入参 `(schema, input)` → 新 schema；
+   不访问数据库、不读时钟、不生成随机数（id 由注入的 factory 提供）
+3. **Service 是唯一业务入口**：权限、状态校验、事务、审计都在这一层；
+   Controller 与 AI Tool 都只是它的调用方
+
+这条分层不是形式主义：正因为 Operation 是纯函数，
+「AI 改问卷」与「人工编辑器改问卷」才能共用同一套实现。
+
+### git 提交
+
+- **一次提交只做一件事**。修 bug 与加功能分开提交
+- 提交信息用中文，格式：
+
+  ```text
+  <type>(<scope>): <一行摘要>
+
+  ## 根因 / 背景
+  ...
+  ## 修复 / 实现
+  ...
+  ## 验证
+  ...
+  ```
+
+  `type` 取 `feat` / `fix` / `refactor` / `test` / `docs` / `chore`
+
+- 提交信息里要写**验证方式**（跑了哪些测试、得到什么结果），
+  不要只写「已修复」
+- **只提交本次改动涉及的文件**。不要用 `git add -A` / `git add .`
+  —— 会把临时脚本、备份文件、误建的文件一起带进去（本项目已发生过两次）
+
+### 提交信息的写法（Windows 上的坑）
+
+PowerShell 里 `git commit -m "中文含 \" 引号"` 会被解析坏，
+报 `fatal: Invalid path` 之类的怪错。稳妥做法是把信息写进文件再 `-F`：
+
+```powershell
+git commit -F commit-msg.txt
+Remove-Item commit-msg.txt
+```
+
+---
+
+## 4. 本机环境的坑（都实际踩过）
+
+### 4.1 编辑文件：不要用 PowerShell 做多行替换
+
+本仓库文件是 **CRLF**。用 PowerShell 的 `[System.IO.File]::ReadAllText` +
+`.Replace()` 做多行匹配时，字符串里的 `\n` 与实际 `\r\n` 不一致，
+**替换会静默失败**（返回原文但不报错）。
+
+推荐顺序：
+
+1. 首选编辑工具（它能处理换行）
+2. 多行批量替换时，写一个 **Node 脚本**（`.mjs`）执行，
+   并在替换前用 `if (!content.includes(old)) { console.error(...); process.exit(1); }` 断言命中
+3. 单行替换可以用 PowerShell，但改完必须 `node --check`（JS）或用别的方式复核
+
+**绝不要用 `Set-Content` 写含中文的文件**（编码会坏）。必须写文件时用：
+
+```powershell
+[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
+```
+
+### 4.2 临时脚本的导入路径
+
+在仓库根目录建临时脚本时，相对导入是 `./src/...`；
+在 `tmp/xxx.ts` 里则是 `../src/...`。
+**这里已经反复出错**（`Cannot find module 'C:\Users\Administrator\Desktop\src\...'`）。
+写完先 `pnpm exec tsx <脚本>` 跑一次看路径对不对。
+
+临时脚本放根目录用 `tmp-*.ts` / `tmp-*.mjs` 命名（已被 `.gitignore` 覆盖），
+或用 `tmp/` 目录。
+
+### 4.3 运行时环境变量只在进程启动时读
+
+`src/config/env.ts` 在模块加载时解析 `process.env`。
+**改完 `.env` 必须重启 `pnpm dev` 才生效** —— `tsx watch` 只监听
+`src/` 下的源码，不会因为 `.env` 变化而重启。
+（历史上「改了配置以为生效了，其实没有」造成过误判。）
+
+### 4.4 请求头不能放非 ASCII
+
+`x-user-id` 里传中文会被 `fetch` 直接拒绝：
+
+```
+TypeError: Cannot convert argument to a ByteString
+```
+
+开发态鉴权接受 **UUID 或用户名**（仅非生产环境），用户名用 ASCII。
+
+### 4.5 `tsx watch` 的行为
+
+- 只监听 `src/`，**不监听 `public/`**（静态文件每次请求都重新读盘，改前端刷新即可）
+- 新增文件有时只触发 `unlink` 事件而非 `change`，重启偶有遗漏；
+  连续改多个文件后，如果行为与源码不符，让用户重启一次
+
+### 4.6 数据库是用户的资产，别乱动
+
+- 用户可能在页面上操作产生了**真实数据**（案件、模板、会话）。
+  代理不要擅自删用户数据；只清理**自己验证过程产生的**数据，且清理前先确认
+- 清理测试残留时要认准特征（时间戳、名称前缀、`created_by`），
+  不要按「非 seed 数据」一刀切
+- 写清理脚本时注意外键顺序：
+
+  ```text
+  review_records → answers → responses → dispatch_tasks
+  → ai_tool_executions → revisions → instances
+  ```
+  删模板前要先断开 `questionnaire_templates.current_version_id`
+  （它指向版本，是循环外键）
+
+---
+
+## 5. 测试规范
+
+### 铁律：测试要断言**需求要求的行为**，不是**当前代码的行为**
+
+本项目最严重的一次事故就是这个：`tools.test.ts` 里写着
+
+```ts
+it("create_template 场景下写入类工具被拒绝", ...) // 断言 INVALID_PARAMETER
+```
+
+而 03 文档第 36.0 节明确规定 `create_template + template（草稿版本）`**是允许的**。
+于是 190 个测试全绿，却掩盖了「AI 根本建不了模板」这个致命缺陷 ——
+测试把 bug 固化成了规范。
+
+**做法：**
+
+- 写测试前先确认需求（`docs/` 里的文档，冲突时以
+  `docs/09-review-and-decisions.md` 的决策日志 D1–D13 为准）
+- 修 bug 时**先写一个会失败的测试**，看它真的失败，再修代码，再看它通过
+- 不要为了让套件变绿而放宽断言
+
+### 授权测试必须同时覆盖纵向与横向
+
+- **纵向**：角色能不能做这类操作（dispatcher 能不能确认问卷）
+- **横向**：同角色能不能操作**别人**的数据（dispatcher A 能不能改 B 的案件）
+
+本项目曾经**一处横向测试都没有**，结果「任何 dispatcher 拿到 uuid
+就能读写别人案件」的漏洞长期存在。现在两类都要有。
+
+### 集成测试的清理
+
+测试跑完数据库应回到基线。`tests/integration/questionnaire/helpers.ts` 里的
+`deleteTestInstance` 已处理完整外键顺序，**优先复用它**而不是每个测试文件
+自己手写一遍（手写版本漏过 `dispatch_tasks`，导致外键报错）。
+
+新增测试文件时确认：跑完该文件后，下列表回到基线（`conversations` 常被忘掉）：
+
+```text
+users / questionnaire_templates / questionnaire_template_versions
+questionnaire_instances / questionnaire_revisions
+dispatch_tasks / questionnaire_responses / ai_conversations / ai_tool_executions
+```
+
+### 真实模型调用
+
+`tests/integration/ai/harness.ts` 与真实模型相关的能力用一个假 Provider 驱动，
+CI 不依赖 `AI_API_KEY`。**需要真实模型验证时**：
+
+- 会消耗用户的额度，**先问用户**
+- 用完把环境还原（用户可能在用同一个数据库）
+- 结论要区分开：「评测器与业务链路正确」≠「模型能力达标」
+
+---
+
+## 6. 这个项目里几个容易搞错的事实
+
+写代码前值得确认一遍，避免凭印象：
+
+1. **`create_template` 的目标是模板的草稿版本**（`target_type: template`），
+   允许写入；已发布的 `template_version` 才拒绝。别把两者混为一谈
+2. **不发宏工具**。只有 7 个增量 Tool，没有「一次生成整份问卷」
+3. **一次 Tool 调用 = 一个 `operation_id` = 一次 Revision**（决策 D9）。
+   一条用户消息产生多次 Revision 是设计目标，不是异常
+4. **下发后结构冻结**（决策 D1）。要改必须先撤回；撤回会把既有答卷与
+   下发任务一并置为 `withdrawn`
+5. **`commit` 只产草稿，不自动发布**。发布要单独调 publish
+6. **模板治理只有 `template_admin`**。`dispatcher` 能改自己案件的问卷，
+   但**不能改模板**（模板是全组织共享资产）
+7. **不要猜响应字段名**。已经因此错过两次
+   （`revision` 快照的字段是 `schema`、模板版本的字段是 `templateVersionId`）。
+   不确定就先发一次请求把 JSON 打出来看
+8. **`prisma dev` 已弃用**。别再把 `DATABASE_URL` 指回 51214 那个 shim
+
+---
+
+## 7. 已知未完成 / 待办
+
+- **前端只有两个页面**：`public/index.html`（工作台）、`public/templates.html`（模板管理）。
+  **答卷填写界面与审核界面还没做**，这两步目前只能走 API
+- **SSE 端点已实现**（`POST /ai/conversations/{id}/messages/stream`），
+  前端工作台的对话已接
+- **D5 评测用例集**（`tests/fixtures/ai-cases/`，8 条）已建好，
+  但**还没用真实模型跑过完整的量化评测**，因此没有成功率数字
+- 结构 V1 **只允许一层 section**（不支持嵌套）
+- 连接池上限默认 5（`src/database/client.ts` 里的 `POOL_MAX`，
+  可用环境变量 `DB_POOL_MAX` 覆盖）。压测前需要调大
+- `.env.bak-prismadev` 是切库前的备份，已 gitignore，可删
+
+---
+
+## 8. 交付前的自检清单
+
+```text
+[ ] pnpm typecheck 通过
+[ ] pnpm test 全绿（不只看通过数，确认失败数为 0）
+[ ] 数据库回到基线（没有留下自己产生的数据）
+[ ] 新增行为都有测试覆盖，且断言的是需求要求的行为
+[ ] 只 git add 了本次相关的文件
+[ ] 提交信息写清「根因 / 实现 / 验证方式」
+[ ] 没有 push（留给用户）
+[ ] 回复里明确说明：哪些是已验证的，哪些是没验证的或不确定的
+```
+
+最后一条尤其重要：**不要把「我觉得应该可以」写成「已完成」**。
+本项目已经出现过一次「进度表声称『AI 创建问卷链路已通』，
+实际整条链路不可用」的情况。
