@@ -7,9 +7,13 @@
  */
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
-import { sendCreated, sendSuccess } from "../../../app/api-response.js";
+import {
+  parsePagination,
+  sendCreated,
+  sendSuccess,
+} from "../../../app/api-response.js";
 import { asyncHandler } from "../../../app/error-handler.js";
-import { validate } from "../../../app/validate.js";
+import { validate, validatedQuery } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireService } from "../service/questionnaire.service.js";
 import { createEditorRouter } from "./editor.controller.js";
@@ -45,6 +49,30 @@ const promoteBody = z.object({
   changeNote: z.string().max(2000).optional(),
 });
 
+/** 实例列表查询（案件管理页） */
+const listInstancesQuery = z.object({
+  page: z.coerce.number().int().positive().optional(),
+  pageSize: z.coerce.number().int().positive().optional(),
+  /** 按标题模糊搜索 */
+  keyword: z.string().optional(),
+  /** 按实例状态筛选 */
+  status: z
+    .enum([
+      "draft",
+      "confirmed",
+      "dispatched",
+      "in_progress",
+      "submitted",
+      "under_review",
+      "returned",
+      "completed",
+      "withdrawn",
+    ])
+    .optional(),
+  /** 只看下发给我的（investigator 视角） */
+  assignedToMe: z.coerce.boolean().optional(),
+});
+
 // ============================================================
 // 序列化
 // ============================================================
@@ -75,6 +103,73 @@ function toInstanceDto(row: {
   };
 }
 
+/**
+ * 列表项序列化。
+ *
+ * 刻意**不含 `currentSchema`**：列表一次可能返回几十份结构（每份都可能很大），
+ * 前端在这个页面也不需要看题目。要看结构走详情接口。
+ *
+ * 「最新下发任务」只取一条：二次下发会产生新任务，管理页关心的是
+ * 「现在这份问卷在谁手上」；历史任务需要时可查 dispatch-tasks。
+ */
+function toInstanceListDto(row: {
+  id: string;
+  title: string;
+  status: string;
+  currentRevision: number;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+  subjectInfo: Record<string, unknown> | null;
+  templateVersionId: string;
+  latestTask: {
+    id: string;
+    assignedTo: string;
+    dispatchedBy: string;
+    status: string;
+    dispatchedAt: Date | null;
+    dueAt: Date | null;
+    withdrawnAt: Date | null;
+  } | null;
+  activeResponse: {
+    id: string;
+    respondentId: string;
+    status: string;
+    submittedAt: Date | null;
+  } | null;
+}) {
+  return {
+    id: row.id,
+    title: row.title,
+    status: row.status,
+    currentRevision: row.currentRevision,
+    templateVersionId: row.templateVersionId,
+    subjectInfo: row.subjectInfo,
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    dispatch: row.latestTask
+      ? {
+          taskId: row.latestTask.id,
+          assignedTo: row.latestTask.assignedTo,
+          dispatchedBy: row.latestTask.dispatchedBy,
+          status: row.latestTask.status,
+          dispatchedAt: row.latestTask.dispatchedAt,
+          dueAt: row.latestTask.dueAt,
+          withdrawnAt: row.latestTask.withdrawnAt,
+        }
+      : null,
+    response: row.activeResponse
+      ? {
+          responseId: row.activeResponse.id,
+          respondentId: row.activeResponse.respondentId,
+          status: row.activeResponse.status,
+          submittedAt: row.activeResponse.submittedAt,
+        }
+      : null,
+  };
+}
+
 // ============================================================
 // Router
 // ============================================================
@@ -101,6 +196,43 @@ export function createInstanceRouter(): Router {
       );
 
       sendCreated(req, res, toInstanceDto(instance));
+    })
+  );
+
+  /**
+   * 列出实例（案件管理页）。
+   *
+   * 横向授权在 Service + Repository 里按行过滤，因此同一个接口
+   * 对 dispatcher / investigator / reviewer 会返回不同的集合，
+   * 前端不需要（也不应该）自己判断能看哪些。
+   */
+  router.get(
+    "/",
+    validate({ query: listInstancesQuery }),
+    asyncHandler(async (req: Request, res: Response) => {
+      const query = validatedQuery<z.infer<typeof listInstancesQuery>>(req);
+      const pagination = parsePagination(req.query as Record<string, unknown>);
+
+      const { items, total, users } = await questionnaireService.listInstances(
+        {
+          ...(query.keyword !== undefined ? { keyword: query.keyword } : {}),
+          ...(query.status !== undefined ? { status: query.status } : {}),
+          ...(query.assignedToMe !== undefined
+            ? { assignedToMe: query.assignedToMe }
+            : {}),
+        },
+        serviceContextOf(req),
+        { skip: pagination.offset, take: pagination.pageSize }
+      );
+
+      sendSuccess(req, res, {
+        items: items.map(toInstanceListDto),
+        // 用户名映射：让前端能显示「下发给谁」而不是一串 uuid
+        users,
+        page: pagination.page,
+        pageSize: pagination.pageSize,
+        total,
+      });
     })
   );
 

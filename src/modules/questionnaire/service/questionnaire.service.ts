@@ -45,9 +45,11 @@ import {
 import type { QuestionnaireSchema } from "../schema/questionnaire.schema.js";
 import {
   questionnaireRepository,
+  type InstanceListRow,
   type InstanceRecord,
   type TemplateVersionRecord,
 } from "../repository/questionnaire.repository.js";
+import { prisma } from "../../../database/client.js";
 
 // ============================================================
 // 上下文与类型
@@ -314,6 +316,69 @@ export const questionnaireService = {
   // ----------------------------------------------------------
   // 读取
   // ----------------------------------------------------------
+
+  /**
+   * 列出问卷实例（案件管理页）。
+   *
+   * 授权是**两层**的：
+   *   1. 纵向：角色必须属于 STRUCTURE_READ_ROLES
+   *   2. 横向：仓库层的 `instanceAccessFilter` 按行过滤
+   *      （dispatcher 只看自己创建的、investigator 只看被指派给自己的…）
+   *      该规则与 `resolveInstanceAccess` 必须保持一致，改动时同步两处
+   *
+   * 为什么不「先全查再逐个校验」：那条路会把不该看的标题读进内存，
+   * 一旦被日志或错误信息带出去就是泄露。让数据库直接过滤更安全。
+   */
+  async listInstances(
+    query: { keyword?: string; status?: string; assignedToMe?: boolean },
+    ctx: ServiceContext,
+    options: { skip: number; take: number }
+  ): Promise<{
+    items: InstanceListRow[];
+    total: number;
+    /** id → 显示名，供前端把 assignedTo / createdBy 显示成人名 */
+    users: Record<string, string>;
+  }> {
+    const allowed = ctx.roles.some((r) =>
+      (STRUCTURE_READ_ROLES as readonly string[]).includes(r)
+    );
+    if (!allowed) {
+      throw permissionDenied(
+        `当前用户角色 [${ctx.roles.join(", ")}] 无权读取问卷列表`
+      );
+    }
+
+    const { items, total } = await questionnaireRepository.listInstances(
+      query,
+      { userId: ctx.userId, roles: ctx.roles },
+      options
+    );
+
+    // 顺带把涉及的用户名查出来：否则前端只能显示 uuid，
+    // 「下发给谁」这种最关键的信息就没法看。
+    const userIds = new Set<string>();
+    for (const it of items) {
+      userIds.add(it.createdBy);
+      if (it.latestTask) {
+        userIds.add(it.latestTask.assignedTo);
+        userIds.add(it.latestTask.dispatchedBy);
+      }
+      if (it.activeResponse) userIds.add(it.activeResponse.respondentId);
+    }
+
+    const users: Record<string, string> = {};
+    if (userIds.size > 0) {
+      const rows = await prisma.user.findMany({
+        where: { id: { in: [...userIds] } },
+        select: { id: true, displayName: true, username: true },
+      });
+      for (const u of rows) {
+        users[u.id] = u.displayName || u.username;
+      }
+    }
+
+    return { items, total, users };
+  },
 
   async getInstance(
     instanceId: string,

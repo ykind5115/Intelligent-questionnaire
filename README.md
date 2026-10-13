@@ -43,7 +43,7 @@ AI 辅助的问卷生成与动态编排系统。用自然语言描述调查需�
 | LLM Provider 抽象 + DeepSeek 实现（决策 D12） | ✅ |
 | AI Orchestrator（上下文 + 工具循环 + 轮数上限 + 幂等） | ✅ |
 | REST API：模板 / 实例 / 人工编辑器 / AI / 下发 / 填写 / 审核 | ✅ |
-| SSE 流式端点 + 前端三页面（下发 / 从零创建 / 模板管理） | ✅ |
+| SSE 流式端点 + 前端四页面（下发 / 案件管理 / 从零创建 / 模板管理） | ✅ |
 | 人工编辑器（决策 D3 兜底） | ✅ |
 | AI 评测用例集（决策 D5，含四类量化指标） | ✅ |
 | 测试：242 例全绿（11 个文件，含真实数据库集成测试） | ✅ |
@@ -195,9 +195,10 @@ public/                     前端（无构建链，原生 ES 模块）
   index.html                下发问卷（首页）
   create.html               从零创建问卷
   templates.html            模板管理
-  common.js                 三页共用工具
+  instances.html            案件管理
+  common.js                 四页共用工具
   dispatch.js / create.js / templates.js
-  app.css                   三页共用样式
+  app.css                   四页共用样式
 tests/
   unit/                     纯函数单元测试
   integration/              直连真实数据库的集成测试
@@ -323,6 +324,9 @@ POST   /api/v1/questionnaire-templates/:templateId/versions/:versionId/disable
 
 ```text
 POST   /api/v1/questionnaire-instances
+GET    /api/v1/questionnaire-instances                      列表（案件管理页）
+       ?keyword=&status=&assignedToMe=&page=&pageSize=
+       —— 返回项含「最新下发任务」与「当前答卷」，按行做横向授权过滤
 GET    /api/v1/questionnaire-instances/:instanceId
 GET    /api/v1/questionnaire-instances/:instanceId/revisions
 GET    /api/v1/questionnaire-instances/:instanceId/revisions/:revisionNo
@@ -330,6 +334,10 @@ POST   /api/v1/questionnaire-instances/:instanceId/confirm
 POST   /api/v1/questionnaire-instances/:instanceId/withdraw
 POST   /api/v1/questionnaire-instances/:instanceId/promote
 ```
+
+> 列表与详情**共用同一套横向授权规则**，避免「列表看得到、点进去 403」：
+> `dispatcher` 只看自己创建的、`investigator` 只看被指派给自己的、
+> `reviewer` 只看有待审答卷的、`template_admin` 看全部。
 
 ### 人工编辑器（决策 D3 的兜底能力）
 
@@ -487,19 +495,25 @@ CI 里用假 Provider 驱动，得到全绿只能证明**评测器与业务链�
 要得到真实模型的能力指标，需要配置 `AI_API_KEY`，
 把 `tests/integration/ai/harness.ts` 里的 Provider 换成 `DeepSeekProvider` 再跑同一套用例。
 
-## 前端（三个页面）
+## 前端（四个页面）
 
 打开 http://127.0.0.1:3000 即可。顶栏是统一的三个 tab：
 
 | 页面 | 做什么 |
 | --- | --- |
 | **下发问卷**（`/`，首页） | 按名称搜索已发布模板 → 看到分组/题目规模 → 选一个 → 填案件标题 → 创建案件，并给出案件 ID |
+| **案件管理**（`/instances.html`） | 看每份案件的状态、**下发给谁**、截止时间、答卷进度、修订号；支持按标题搜索、按状态筛选、「只看下发给我的」；选中后看当前结构、结构变更历史与历史快照，并可确认 / 撤回 / 扶正 |
 | **从零创建**（`/create.html`） | **先给问卷起名字** → 与 AI 对话一轮轮生成 → 右侧实时显示生成结果与结构 → 「保存为模板草稿」定稿 → 「发布为正式模板」→ 发布后可直接「立即建案件」 |
 | **模板管理**（`/templates.html`） | 搜索/筛选模板列表 → 查看结构与版本 → 改名称与描述 → 发布 / 停用 / 删除 |
 
-三个页面共用 `public/common.js`（请求、toast、用户选择器、顶栏、格式化）与
+四个页面共用 `public/common.js`（请求、toast、用户选择器、顶栏、格式化）与
 `public/app.css`。共用逻辑集中在 `common.js` 而不是各页复制一份，
-避免三个页面行为漂移。
+避免各页行为漂移。
+
+**案件列表的可见范围由后端按行过滤**（dispatcher 只看自己创建的、
+investigator 只看被指派给自己的、reviewer 只看有待审答卷的、
+template_admin 看全部），前端不做权限假设 ——
+同一个页面在不同账号下看到的集合本来就不同。
 
 之所以用原生 JS 而不是框架：内网环境常常没有外网，
 既不能装依赖也不能用 CDN；服务端直接托管静态文件即可。

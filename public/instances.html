@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>案件管理 · 智能问卷</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">智能问卷</div>
+      <nav id="nav" class="nav"></nav>
+
+      <div class="topbar-controls">
+        <label class="field">
+          <span>当前用户</span>
+          <select id="user-select"></select>
+        </label>
+
+        <label class="field grow">
+          <span>搜索案件</span>
+          <input id="search-input" placeholder="按案件标题搜索，回车即查" />
+        </label>
+
+        <label class="field">
+          <span>状态</span>
+          <select id="status-filter">
+            <option value="">全部</option>
+            <option value="draft">草稿</option>
+            <option value="confirmed">已确认</option>
+            <option value="dispatched">已下发</option>
+            <option value="submitted">已提交待审</option>
+            <option value="returned">已退回</option>
+            <option value="completed">已完成</option>
+          </select>
+        </label>
+
+        <label class="field checkbox-field">
+          <span>&nbsp;</span>
+          <label class="inline-check">
+            <input id="only-mine" type="checkbox" />
+            只看下发给我的
+          </label>
+        </label>
+
+        <button id="btn-search" class="btn btn-primary">查询</button>
+      </div>
+    </header>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <main class="manage-layout">
+      <!-- ============ 左：列表 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>案件列表</h2>
+          <span id="count-badge" class="badge">-</span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>案件标题</th>
+                <th>状态</th>
+                <th>下发给</th>
+                <th>截止</th>
+                <th>答卷</th>
+                <th>rev</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody id="instance-rows">
+              <tr>
+                <td colspan="7" class="empty">载入中…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pager">
+          <button id="btn-prev" class="btn btn-sm">上一页</button>
+          <span id="page-info" class="hint">-</span>
+          <button id="btn-next" class="btn btn-sm">下一页</button>
+        </div>
+      </section>
+
+      <!-- ============ 右：详情 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2 id="detail-title">案件详情</h2>
+          <span id="detail-status" class="badge">未选择</span>
+        </div>
+
+        <div class="toolbar">
+          <button id="btn-confirm" class="btn btn-sm">确认问卷</button>
+          <button id="btn-withdraw" class="btn btn-sm btn-danger">撤回</button>
+          <button id="btn-promote" class="btn btn-sm">扶正为模板</button>
+        </div>
+
+        <div id="detail-body" class="detail">
+          <p class="hint">从左侧列表点一个案件查看详情。</p>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/instances.js"></script>
+  </body>
+</html>

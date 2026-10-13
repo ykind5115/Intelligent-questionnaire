@@ -299,13 +299,15 @@ CI 不依赖 `AI_API_KEY`。**需要真实模型验证时**：
 
 ```text
 public/index.html      下发问卷（首页，/）：搜索选模板 → 建案件
+public/instances.html  案件管理：看已下发案件的状态/下发给谁/答卷进度，
+                       并可确认 / 撤回 / 扶正
 public/create.html     从零创建：先取名 → AI 对话 → 定稿 → 发布 → 立即建案
 public/templates.html  模板管理：搜索 / 查看结构 / 改名 / 发布 / 停用 / 删除
-public/common.js       三页共用：api / toast / el / 用户选择器 / 顶栏 tab / 格式化
-public/app.css         三页共用样式
+public/common.js       四页共用：api / toast / el / 用户选择器 / 顶栏 tab / 格式化
+public/app.css         四页共用样式
 ```
 
-三页各自的脚本是 `dispatch.js` / `create.js` / `templates.js`，
+各页脚本是 `dispatch.js` / `instances.js` / `create.js` / `templates.js`，
 通过 `<script type="module">` 加载。
 
 **共用逻辑必须放进 `common.js`**，不要各页复制一份 ——

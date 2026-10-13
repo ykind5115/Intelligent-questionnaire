@@ -44,6 +44,85 @@ export interface TemplateVersionRecord {
   createdBy: string;
 }
 
+/**
+ * 实例列表行（案件管理页用）。
+ *
+ * 只取列表需要的字段：**不带 `current_schema`**。
+ * 结构是 JSONB 且可能很大，列表里带上会让响应体成倍增长；
+ * 需要看结构时按 id 走详情接口。
+ */
+export interface InstanceListRow {
+  id: string;
+  title: string;
+  status: string;
+  currentRevision: number;
+  createdBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+  subjectInfo: Record<string, unknown> | null;
+  templateVersionId: string;
+  /** 最新一条下发任务（撤回后二次下发会是新的那条；历史任务保留在库里） */
+  latestTask: {
+    id: string;
+    assignedTo: string;
+    dispatchedBy: string;
+    status: string;
+    dispatchedAt: Date | null;
+    dueAt: Date | null;
+    withdrawnAt: Date | null;
+  } | null;
+  /** 当前待处理的答卷（优先取未提交的，否则取最新一份） */
+  activeResponse: {
+    id: string;
+    respondentId: string;
+    status: string;
+    submittedAt: Date | null;
+  } | null;
+}
+
+/**
+ * 构造「这个用户能看哪些实例」的过滤条件（横向授权）。
+ *
+ * 与 `resolveInstanceAccess`（Service 层逐个实例的判定）保持一致：
+ * 两处规则必须同步，否则会出现「列表看得到、点进去 403」。
+ * 因此这里刻意写成同一套规则，并在注释里互相指向。
+ *
+ * - template_admin：模板治理需要，可见全部
+ * - dispatcher：只能看到自己创建的实例
+ * - investigator：被指派给自己，或自己已填过答卷的实例
+ * - reviewer：有已提交/已审核答卷的实例（审核工作台）
+ */
+function instanceAccessFilter(ctx: {
+  userId: string;
+  roles: string[];
+}): Record<string, unknown> {
+  const roles = ctx.roles;
+
+  if (roles.includes("template_admin")) return {};
+
+  const or: Record<string, unknown>[] = [];
+
+  if (roles.includes("dispatcher")) {
+    or.push({ createdBy: ctx.userId });
+  }
+
+  if (roles.includes("investigator")) {
+    or.push({ dispatchTasks: { some: { assignedTo: ctx.userId } } });
+    or.push({ responses: { some: { respondentId: ctx.userId } } });
+  }
+
+  if (roles.includes("reviewer")) {
+    or.push({
+      responses: { some: { status: { in: ["submitted", "reviewed"] } } },
+    });
+  }
+
+  // 有读权限但没有匹配到任何分支（例如角色组合异常）→ 什么都不给
+  if (or.length === 0) return { id: { equals: "__no_access__" } };
+
+  return { OR: or };
+}
+
 /** JSONB 里的 schema 读出来后必须校验，不能盲目信任数据库内容（04 文档第 44 节） */
 function parseSchema(raw: unknown, subject: string): QuestionnaireSchema {
   const parsed = questionnaireSchema.safeParse(raw);
@@ -278,6 +357,103 @@ export const questionnaireRepository = {
     });
 
     return { items, total };
+  },
+
+  /**
+   * 列出问卷实例（案件管理页）。
+   *
+   * 与 `findInstanceById` 的区别：这里**不带 `current_schema`**，并附带
+   * 「最新下发任务」与「当前待处理答卷」，让列表一屏就能回答
+   * 「这份问卷现在在谁手上、到哪一步了」。
+   */
+  async listInstances(
+    query: {
+      /** 标题模糊匹配（不区分大小写） */
+      keyword?: string;
+      /** 实例状态 */
+      status?: string;
+      /** 只要下发给我的（investigator 视角） */
+      assignedToMe?: boolean;
+    },
+    access: { userId: string; roles: string[] },
+    options: { skip: number; take: number }
+  ): Promise<{ items: InstanceListRow[]; total: number }> {
+    const accessFilter = instanceAccessFilter(access);
+
+    const where: Record<string, unknown> = {
+      ...accessFilter,
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.keyword
+        ? { title: { contains: query.keyword, mode: "insensitive" } }
+        : {}),
+      ...(query.assignedToMe
+        ? { dispatchTasks: { some: { assignedTo: access.userId } } }
+        : {}),
+    };
+
+    const [rows, total] = await Promise.all([
+      prisma.questionnaireInstance.findMany({
+        where,
+        // 最近更新的排前面：管理场景更关心"刚动过的"
+        orderBy: { updatedAt: "desc" },
+        skip: options.skip,
+        take: options.take,
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          currentRevision: true,
+          createdBy: true,
+          createdAt: true,
+          updatedAt: true,
+          subjectInfo: true,
+          templateVersionId: true,
+          // 只要最新一条：二次下发会产生新任务，管理页关心的是「现在这条」
+          dispatchTasks: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: {
+              id: true,
+              assignedTo: true,
+              dispatchedBy: true,
+              status: true,
+              dispatchedAt: true,
+              dueAt: true,
+              withdrawnAt: true,
+            },
+          },
+          // 待处理优先（draft 在上），否则取最新一份
+          responses: {
+            orderBy: [{ submittedAt: "desc" }, { createdAt: "desc" }],
+            take: 1,
+            select: {
+              id: true,
+              respondentId: true,
+              status: true,
+              submittedAt: true,
+            },
+          },
+        },
+      }),
+      prisma.questionnaireInstance.count({ where }),
+    ]);
+
+    return {
+      total,
+      items: rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        currentRevision: r.currentRevision,
+        createdBy: r.createdBy,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        subjectInfo: (r.subjectInfo ?? null) as Record<string, unknown> | null,
+        templateVersionId: r.templateVersionId,
+        latestTask: r.dispatchTasks[0] ?? null,
+        activeResponse: r.responses[0] ?? null,
+      })),
+    };
   },
 
   /** 列出实例的修订历史（不含快照内容，避免列表接口过大） */  async listRevisions(

@@ -849,3 +849,37 @@ textarea:focus {
   padding: 12px 16px;
   border-top: 1px solid var(--border);
 }
+
+/* ============================================================
+   案件管理页
+   ============================================================ */
+
+/* 表头里的复选框（「只看下发给我的」） */
+.field.checkbox-field {
+  justify-content: flex-end;
+}
+
+.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  padding: 7px 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.inline-check input {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* 列表里被选中的行 */
+.table tbody tr.row-selected {
+  background: var(--primary-weak);
+}
+
+.table tbody tr.row-selected:hover {
+  background: var(--primary-weak);
+}

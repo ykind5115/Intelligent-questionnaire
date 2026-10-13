@@ -255,9 +255,14 @@ export async function initUserPicker(preferredUsername) {
 // 顶栏导航
 // ============================================================
 
-/** 三个页面共用的顶栏 tab */
+/**
+ * 四个页面共用的顶栏 tab。
+ *
+ * 顺序按使用频率排：日常最常用的「下发问卷」在最左。
+ */
 export const NAV_ITEMS = [
   { href: "/", label: "下发问卷", key: "dispatch" },
+  { href: "/instances.html", label: "案件管理", key: "instances" },
   { href: "/create.html", label: "从零创建", key: "create" },
   { href: "/templates.html", label: "模板管理", key: "templates" },
 ];
