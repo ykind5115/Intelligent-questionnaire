@@ -345,7 +345,7 @@ modify_questionnaire + questionnaire_instance  ← 允许
 | `submitted_at` | timestamptz | 是 | — | 提交时间（退回时清空） |
 | `created_at` / `updated_at` | timestamptz | 否 | now | |
 
-`status` 取值（`RESPONSE_STATUSES` **加上**审核流程会写入的 `reviewed`）：
+`status` 取值（与代码常量 `RESPONSE_STATUSES` 一致）：
 
 ```text
 draft      填写中（可保存答案）
@@ -354,13 +354,14 @@ reviewed   审核通过（由 review 写入；不再出现在待审核列表）
 withdrawn  因撤回而作废（二次下发会新建一份 draft，不复用旧的）
 ```
 
-> 注意：代码常量 `RESPONSE_STATUSES = ["draft","submitted","withdrawn"]`
-> **漏了 `reviewed`** —— 审核通过时确实会写入该值（`review.service.ts:403`）。
-> 常量只用于「可填写状态」判断，不影响运行，但作为参考会误导。
+> 别把 `RESPONSE_STATUSES` 与 `RESPONSE_FILLABLE_STATUSES` 混用：
+> 前者是「库里可能出现哪些值」，后者只有 `draft`，用于判断「能不能继续写」。
+> 前者曾漏掉 `reviewed`（导致按 `reviewed` 过滤被 422 拒），现已补齐并有测试约束。
 >
-> 另：文档第 2708 行提到响应状态 `under_review`。响应表**没有**这个取值，
-> 但**实例**的 `WITHDRAWABLE` 列表里有 `under_review`（见第 4 节）。
-> 也就是说这个状态是为「实例审核中」预留的，目前没有任何代码写入它。
+> 另：04 第 2708 行（规则八）提到 `under_review`，那是**实例**状态，
+> 出现在「禁止写入 `current_schema`」的列表里 —— 与实例的
+> `WITHDRAWABLE` 常量一致（见第 4 节）。
+> 响应表**没有**该取值：审核是原子的，不需要「审核中」中间态。
 
 ---
 
@@ -482,17 +483,27 @@ withdrawn  因撤回而作废（二次下发会新建一份 draft，不复用旧
 
 ## 16. 与设计文档的差异汇总
 
-以实际库为准，共 3 处实质差异 + 2 处文档内部不一致：
+本节记录「文档写的」与「库/代码实际是的」不一致之处，以及各自的处理方式。
 
-| # | 位置 | 文档 | 实际 | 判断 |
-| --- | --- | --- | --- | --- |
-| 1 | `ai_tool_executions.conversation_id` | `NOT NULL` | 可空 | **实现更合理**：人工编辑器没有会话，需要记录审计 |
-| 2 | `ai_tool_executions` | 无 `source` / `model` | 有这两列 | **实现扩展**：区分 AI 与人工、记录模型 |
-| 3 | `users.roles` | `NOT NULL` + 建议 GIN 索引 | 可空、无 GIN 索引 | 实际始终写数组；按角色过滤在应用层做，当前数据量无影响 |
-| 4 | 04 第 51.2 节 | 「`operation_id` 不加唯一约束」 | `ai_tool_executions.operation_id` **有** UNIQUE | 该行说的是 `questionnaire_revisions`（确实没有）；第 24.3 节明确要求保留 UNIQUE，实现正确 |
-| 5 | `RESPONSE_STATUSES` 常量 | — | 缺 `reviewed` | 代码内不一致：审核会写入该值。建议补上 |
+**处理原则**（沿用本项目的既有约定）：设计文档作为 **V1.0 基线保持可追溯**，
+不改写原始结论；实现阶段的**设计扩展**记入
+[09-review-and-decisions.md](09-review-and-decisions.md) 的决策日志（D1–D15）；
+**笔误**则原地订正。
 
-此外文档第 2708 行提到响应状态 `under_review`：响应表没有该取值，但实例的 `WITHDRAWABLE` 列表里有它（为「实例审核中」预留，当前无代码写入）。
+| # | 位置 | 文档 | 实际 | 性质 | 处理 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `ai_tool_executions.conversation_id` | `NOT NULL` | 可空 | 实现时的**设计扩展** | ✅ 记入 **D14**（实测 13 条人工审计全部无会话；04 第 23.2 节保留原文，以 D14 为准） |
+| 2 | `ai_tool_executions` | 无 `source` / `model` | 有这两列 | 实现扩展 | ✅ 同 **D14**（区分 AI 与人工编辑、记录模型） |
+| 3 | `users.roles` | `NOT NULL` | 可空 | **文档笔误** | ✅ 已订正 04 第 8.2 节并加注 |
+| 4 | `users` GIN 索引 | 建议创建 | 未创建 | **遗留建议** | ✅ 已在 04 第 8.4 节标注「V1 未创建」 |
+| 5 | 04 第 51.2 节 | 「`operation_id` 不加唯一约束」 | `ai_tool_executions.operation_id` **有** UNIQUE | **表述歧义** | ✅ 已限定为「仅指本表」，并记入 **D15** 说明两表的不同取舍 |
+| 6 | `RESPONSE_STATUSES` 常量 | — | 曾漏 `reviewed` | **代码不一致** | ✅ 已补齐，并加测试约束「常量必须覆盖会被写入的取值」 |
+
+另外 04 第 2708 行（规则八）的 `under_review` 是**实例**状态，
+与实例的 `WITHDRAWABLE` 常量一致；响应表没有该取值 —— 这**不是**差异。
+
+> 想知道「现在是什么样」看本文档；想知道「当初为什么这样设计」看 04；
+> 想知道「后来为什么改了」看 09 的决策日志。
 
 ---
 
