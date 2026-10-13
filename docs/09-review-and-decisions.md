@@ -33,7 +33,66 @@
 | D11 | 登录与账号 | **V1 不做注册/登录接口**。使用 `seed.ts` 固定的 4 个测试账号；开发态由请求头 `x-user-id` 指定当前用户，后端解析为 `CurrentUser`，**接口契约与正式鉴权一致**，后续替换中间件即可接真实鉴权 | 04, 05, 06 |
 | D12 | LLM 模型 | **DeepSeek `deepseek-v41-flash`**（OpenAI 兼容协议）。模型名、base URL、Key 全部走环境变量；业务层只依赖 `LLMProvider` 接口 | 06, 08 |
 | D13 | 部署与迁移 | **V1 本机跑通**；后期整体迁移到**内网**，届时模型接口替换为自研服务 | 02, 06 |
+| D14 | 审计表如何容纳**人工编辑** | `ai_tool_executions.conversation_id` **改为可空**，并新增 `source`（`ai_tool` / `manual_editor`）与 `model` 两列 | 04 |
+| D15 | `operation_id` 唯一约束的范围 | **只有** `ai_tool_executions.operation_id` 加 UNIQUE；`questionnaire_revisions.operation_id` **不加**（一次操作可能产生多条审计，而 Revision 与 Tool 调用一对一，唯一性由前者保证） | 04 |
 
+---
+
+## 2.1 D14 落地：审计表容纳人工编辑（实现阶段补记）
+
+**背景**：D3 决定「必须做人工编辑器，但排在最后」。做的时候才发现，
+D1–D13 定稿的 `ai_tool_executions` 结构里 `conversation_id` 是 `NOT NULL` ——
+而人工编辑**没有 AI 会话**，却同样需要留审计。
+
+**实测证据**（本地库）：
+
+```text
+source          总数  有会话  无会话
+manual_editor     13      0      13
+rest               1      0       1
+```
+
+**决策**：
+
+```sql
+ALTER TABLE ai_tool_executions
+    ALTER COLUMN conversation_id DROP NOT NULL,
+    ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'ai_tool',
+    ADD COLUMN model  VARCHAR(100);
+    -- source: 'ai_tool' | 'manual_editor'
+```
+
+**理由**：
+
+1. 审计的价值在于「**谁**在**什么时候**对**哪份问卷**做了什么」。
+   人工编辑同样要有这条记录，否则 AI 改的和人改的无法区分、也无法追溯
+2. 若坚持 `conversation_id NOT NULL`，就只能给人工编辑伪造一个会话 ——
+   那是往数据里塞假信息，比放宽约束坏得多
+3. `source` 是区分两类操作的关键字段；`model` 只在 AI 路径有值
+
+**注意**：这是一处**有意的设计扩展**，不是文档笔误。
+后续若有人想把 `conversation_id` 改回 `NOT NULL`，先看本节。
+（04 第 23.2 节仍写 `NOT NULL`，那是 V1.0 基线的原文，以本节为准。）
+
+---
+
+## 2.2 D15 落地：`operation_id` 唯一约束的范围
+
+**背景**：04 第 51.2 节写「`questionnaire_revisions` 的 `operation_id` 不加唯一约束」，
+容易被读成「`operation_id` 都没有唯一约束」，而实际 `ai_tool_executions.operation_id`
+**有** UNIQUE 索引。两者并不矛盾，是**不同表的不同取舍**，这里写清。
+
+**决策**：
+
+| 表 | `operation_id` 是否唯一 | 原因 |
+| --- | --- | --- |
+| `ai_tool_executions` | **UNIQUE** | 它是幂等键。D9 要求「一次 Tool 调用 = 一个 `operation_id`」，这条不变量由数据库兜底（04 第 24.3 节） |
+| `questionnaire_revisions` | **不唯一** | 它只是「这次改动来自哪次操作」的溯源标记。一次操作可能写多条审计，而 Revision 与 Tool 调用一对一 —— 唯一性已由前者保证，再加约束是冗余 |
+
+**实现方式仍是「先查后插」**（D9）：查询 `ai_tool_executions` 判断是否已执行过，
+UNIQUE 只作最后一道防线，不依赖它抛异常来触发幂等。
+
+---
 ---
 
 # 3. D1 落地：问卷状态与可修改边界

@@ -292,7 +292,9 @@ CREATE TABLE users (
     password_hash TEXT,
     status VARCHAR(20) NOT NULL DEFAULT 'active',
 
-    roles VARCHAR(30)[] NOT NULL DEFAULT '{}',
+    roles VARCHAR(30)[] DEFAULT '{}',
+    -- 已知差异：Prisma 侧生成的是可空列（代码始终写数组，读时按空数组处理）。
+    -- 设计扩展的记录方式见 09 文档 D14 一节。
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -341,7 +343,8 @@ reviewer            问卷审核
    新增角色时不需要 ALTER TYPE，迁移成本更低。
 
 4. 需要按角色查询用户时，可加 GIN 索引：
-   CREATE INDEX idx_users_roles ON users USING GIN (roles);
+   -- V1 未创建该索引：按角色过滤在应用层完成，当前数据量无需 GIN。
+-- CREATE INDEX idx_users_roles ON users USING GIN (roles);
 ```
 
 本文档早期版本写的是「V1 的角色权限可以暂时简化，
@@ -2453,7 +2456,7 @@ V2/V3
 | `users` | 新增 `roles VARCHAR(30)[]` | D8 |
 | `questionnaire_template_versions` | 新增 `source_type`、`source_instance_id` | D2 |
 | `questionnaire_revisions` | `created_by` 补 FK | — |
-| `questionnaire_revisions` | `operation_id` 不加唯一约束 | D9 |
+| `questionnaire_revisions` | `operation_id` 不加唯一约束（**仅指本表**；`ai_tool_executions.operation_id` 仍有 UNIQUE，见 D15） | D9 / D15 |
 | `dispatch_tasks` | 新增 `withdrawn_at`、`withdrawn_by` | D1 |
 | `questionnaire_answers` | 新增 `revision_no INTEGER NOT NULL` | — |
 | `questionnaire_responses` | `status` 增加 `withdrawn` 取值 | D1 |
