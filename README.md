@@ -43,7 +43,7 @@ AI 辅助的问卷生成与动态编排系统。用自然语言描述调查需�
 | LLM Provider 抽象 + DeepSeek 实现（决策 D12） | ✅ |
 | AI Orchestrator（上下文 + 工具循环 + 轮数上限 + 幂等） | ✅ |
 | REST API：模板 / 实例 / 人工编辑器 / AI / 下发 / 填写 / 审核 | ✅ |
-| SSE 流式端点 + 工作台前端 | ✅ |
+| SSE 流式端点 + 前端三页面（下发 / 从零创建 / 模板管理） | ✅ |
 | 人工编辑器（决策 D3 兜底） | ✅ |
 | AI 评测用例集（决策 D5，含四类量化指标） | ✅ |
 | 测试：242 例全绿（11 个文件，含真实数据库集成测试） | ✅ |
@@ -191,7 +191,13 @@ src/
       prompts/              System Prompt 与结构摘要
       service/              会话编排与落库
     dispatch/ response/ review/   下发、填写、审核
-public/                     工作台前端（无构建链）
+public/                     前端（无构建链，原生 ES 模块）
+  index.html                下发问卷（首页）
+  create.html               从零创建问卷
+  templates.html            模板管理
+  common.js                 三页共用工具
+  dispatch.js / create.js / templates.js
+  app.css                   三页共用样式
 tests/
   unit/                     纯函数单元测试
   integration/              直连真实数据库的集成测试
@@ -383,8 +389,19 @@ POST   /api/v1/questionnaire-responses/:id/review
 ```text
 GET    /healthz                 健康检查（含数据库连通性）
 GET    /api/v1/me               当前鉴权用户
-GET    /api/v1/dev/users        可用账号列表（**仅非生产环境**）
-GET    /                        工作台前端
+GET    /api/v1/dev/users        可用账号列表（仅非生产环境）
+
+GET    /api/v1/questionnaire-templates/published-versions
+                                可用的已发布版本（每个模板仅当前生效版本，
+                                含分组/题目数，供「下发问卷」页选模板）
+```
+
+### 前端页面
+
+```text
+GET    /                        下发问卷页（首页）
+GET    /create.html             从零创建问卷页
+GET    /templates.html          模板管理页
 ```
 
 ## AI 工具集（7 个，全部是增量操作）
@@ -470,18 +487,23 @@ CI 里用假 Provider 驱动，得到全绿只能证明**评测器与业务链�
 要得到真实模型的能力指标，需要配置 `AI_API_KEY`，
 把 `tests/integration/ai/harness.ts` 里的 Provider 换成 `DeepSeekProvider` 再跑同一套用例。
 
-## 工作台前端
+## 前端（三个页面）
 
-打开 http://127.0.0.1:3000 即可。三个区域：
+打开 http://127.0.0.1:3000 即可。顶栏是统一的三个 tab：
 
-- **顶栏**：切换用户（4 个种子账号）、载入或新建实例
-- **左侧**：与 AI 对话。工具调用会显示成进度条（执行中 / 完成 / 失败），
-  结构一变右侧树自动刷新
-- **右侧**：结构树。标题可直接点开改，题目支持上移 / 下移 / 换组 / 删除，
-  顶部可确认、扶正、撤回
+| 页面 | 做什么 |
+| --- | --- |
+| **下发问卷**（`/`，首页） | 按名称搜索已发布模板 → 看到分组/题目规模 → 选一个 → 填案件标题 → 创建案件，并给出案件 ID |
+| **从零创建**（`/create.html`） | **先给问卷起名字** → 与 AI 对话一轮轮生成 → 右侧实时显示生成结果与结构 → 「保存为模板草稿」定稿 → 「发布为正式模板」→ 发布后可直接「立即建案件」 |
+| **模板管理**（`/templates.html`） | 搜索/筛选模板列表 → 查看结构与版本 → 改名称与描述 → 发布 / 停用 / 删除 |
+
+三个页面共用 `public/common.js`（请求、toast、用户选择器、顶栏、格式化）与
+`public/app.css`。共用逻辑集中在 `common.js` 而不是各页复制一份，
+避免三个页面行为漂移。
 
 之所以用原生 JS 而不是框架：内网环境常常没有外网，
 既不能装依赖也不能用 CDN；服务端直接托管静态文件即可。
+用 ES 模块（`<script type="module">`）而不是打包，因此也没有构建步骤。
 
 ## 已知限制
 

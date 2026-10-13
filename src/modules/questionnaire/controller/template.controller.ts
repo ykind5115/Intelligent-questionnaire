@@ -24,7 +24,8 @@ import { createTemplateEditorRouter } from "./editor.controller.js";
 // ============================================================
 
 const createTemplateBody = z.object({
-  name: z.string().min(1).max(200),
+  // trim 后校验：纯空格名称在 API 边界就报错，不靠 Service 兜
+  name: z.string().trim().min(1, "模板名称不能为空").max(200),
   description: z.string().max(2000).optional(),
 });
 
@@ -51,10 +52,17 @@ const listQuery = z.object({
   status: z.enum(["draft", "published", "disabled"]).optional(),
 });
 
-const idParams = z.object({ templateId: z.string().min(1) });
+/** 选模板用：只需要关键字与分页 */
+const publishedVersionsQuery = z.object({
+  page: z.coerce.number().int().positive().optional(),
+  pageSize: z.coerce.number().int().positive().optional(),
+  keyword: z.string().optional(),
+});
+
+const idParams = z.object({ templateId: z.uuid() });
 const versionParams = z.object({
-  templateId: z.string().min(1),
-  versionId: z.string().min(1),
+  templateId: z.uuid(),
+  versionId: z.uuid(),
 });
 
 /**
@@ -156,6 +164,33 @@ export function createTemplateRouter(): Router {
 
       sendSuccess(req, res, {
         items: items.map(toTemplateDto),
+        page: pagination.page,
+        pageSize: pagination.pageSize,
+        total,
+      });
+    })
+  );
+
+  /**
+   * 可用的已发布版本（下发问卷时选模板用）。
+   *
+   * **必须注册在 `/:templateId` 之前** —— 否则 "published-versions"
+   * 会被当成一个 templateId 参数匹配掉。
+   */
+  router.get(
+    "/published-versions",
+    validate({ query: publishedVersionsQuery }),
+    asyncHandler(async (req: Request, res: Response) => {
+      const query = validatedQuery<z.infer<typeof publishedVersionsQuery>>(req);
+      const pagination = parsePagination(req.query as Record<string, unknown>);
+
+      const { items, total } = await templateService.listCurrentPublishedVersions(
+        { ...(query.keyword !== undefined ? { keyword: query.keyword } : {}) },
+        { skip: pagination.offset, take: pagination.pageSize }
+      );
+
+      sendSuccess(req, res, {
+        items,
         page: pagination.page,
         pageSize: pagination.pageSize,
         total,

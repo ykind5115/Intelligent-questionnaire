@@ -216,8 +216,11 @@ export const aiConversationService = {
    * 创建 AI 会话。
    *
    * create_template：
-   *   需要提供一个 draft 模板版本作为写入目标（由模板 API 或
-   *   AI 生成流程预先创建），会话绑定它。
+   *   - 给了 targetId：绑定那个 draft 模板版本（校验存在且为 draft）
+   *   - 没给 targetId：**自动创建一个 draft 模板与版本**，
+   *     名称优先用 templateName，没给才回落到时间戳占位名。
+   *     有了 templateName，用户能在创建的那一刻就确定名字，
+   *     而不是生成完再去模板管理里改名（否则同一时刻多次创建会分不清）。
    *
    * modify_questionnaire：
    *   targetId 指向问卷实例；此处即校验其存在性与所有权。
@@ -227,6 +230,8 @@ export const aiConversationService = {
       scene: string;
       targetType?: string;
       targetId?: string;
+      /** 仅 create_template 且未给 targetId 时使用 */
+      templateName?: string;
     },
     ctx: AiServiceContext
   ): Promise<CreateConversationResult> {
@@ -248,13 +253,21 @@ export const aiConversationService = {
 
       if (!targetVersionId) {
         // 建模板需要 template_admin：AI 创建问卷属于模板治理动作。
-        // 若当前用户不是模板管理员，这里会抛出清晰的 PERMISSION_DENIED。
+        // 若当前用户不是 template_admin，这里会抛出清晰的 PERMISSION_DENIED。
+        const name = input.templateName?.trim();
+
+        // 名称优先级：调用方给的名字 > 本地时间占位名。
         //
-        // 名称里用**本地时间**：toISOString() 永远返回 UTC，
-        // 会让东八区用户看到「AI 新建问卷 07:48」而当时其实是 15:48，
-        // 很容易被误认为数据不对。这个只是个占位名，commit 时会被真实名称覆盖。
+        // 为什么要允许调用方给名字：占位名（「AI 新建问卷 15:48」）在
+        // 同一时刻多次创建时完全无法区分，用户生成完还得去模板管理里改名。
+        // 让名字在**创建的那一刻**就确定，省掉这一步。
+        //
+        // 占位名用**本地时间**：toISOString() 永远返回 UTC，
+        // 会让东八区用户看到差 8 小时的时间，像是数据出错。
         const template = await templateService.createTemplate(
-          { name: `AI 新建问卷 ${formatLocalTimestamp(new Date())}` },
+          {
+            name: name || `AI 新建问卷 ${formatLocalTimestamp(new Date())}`,
+          },
           ctx
         );
 

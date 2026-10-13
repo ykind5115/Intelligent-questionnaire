@@ -14,6 +14,7 @@
  */
 import { transaction, type Tx } from "../../../database/transaction.js";
 import { prisma } from "../../../database/client.js";
+import { questionnaireRepository } from "../repository/questionnaire.repository.js";
 import { newId } from "../../../shared/utils/id.js";
 import { toJsonValue } from "../../../shared/utils/json.js";
 import {
@@ -263,6 +264,56 @@ export const templateService = {
    * version_no 由后端计算（05 文档第 9.6 节：客户端不能指定 versionNo）。
    * 新版本一律为 draft，必须经 publish 才生效。
    */
+  /**
+   * 列出「可用的已发布模板版本」——下发问卷时选模板用。
+   *
+   * 每个模板只返回**当前生效的那一个**已发布版本：
+   *   业务语义是「选一个模板」，把同一模板的历史版本全列出来只会让人
+   *   不知道该选哪个。需要看历史版本时走模板详情页。
+   *
+   * 顺带算出结构规模（几个分组、几道题）：只显示名字很难判断该选哪个模板。
+   */
+  async listCurrentPublishedVersions(
+    query: { keyword?: string },
+    options: { skip: number; take: number }
+  ): Promise<{
+    items: {
+      versionId: string;
+      templateId: string;
+      templateName: string;
+      templateDescription: string | null;
+      versionNo: number;
+      publishedAt: Date;
+      sectionCount: number;
+      questionCount: number;
+    }[];
+    total: number;
+  }> {
+    const { items, total } =
+      await questionnaireRepository.listCurrentPublishedVersions(query, options);
+
+    return {
+      total,
+      items: items.map((v) => {
+        const sections =
+          (v.schema as { sections?: { questions?: unknown[] }[] })?.sections ?? [];
+        return {
+          versionId: v.versionId,
+          templateId: v.templateId,
+          templateName: v.templateName,
+          templateDescription: v.templateDescription,
+          versionNo: v.versionNo,
+          publishedAt: v.publishedAt,
+          sectionCount: sections.length,
+          questionCount: sections.reduce(
+            (n, s) => n + (s.questions?.length ?? 0),
+            0
+          ),
+        };
+      }),
+    };
+  },
+
   async createVersion(
     templateId: string,
     input: {

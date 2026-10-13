@@ -32,32 +32,34 @@ import { questionnaireService } from "../service/questionnaire.service.js";
 // 请求 Schema（两套目标共用 body，params 各自不同）
 // ============================================================
 
-const instanceParams = z.object({ instanceId: z.string().min(1) });
+const instanceParams = z.object({ instanceId: z.uuid() });
 
 const instanceQuestionParams = z.object({
-  instanceId: z.string().min(1),
+  instanceId: z.uuid(),
+  // 题目/分组的 id 是结构内自造的短 id（如 q_xxx、sec_xxx），
+  // 不是 UUID，因此这里只能校验非空
   questionId: z.string().min(1),
 });
 
 const instanceSectionParams = z.object({
-  instanceId: z.string().min(1),
+  instanceId: z.uuid(),
   sectionId: z.string().min(1),
 });
 
 const versionParams = z.object({
-  templateId: z.string().min(1),
-  versionId: z.string().min(1),
+  templateId: z.uuid(),
+  versionId: z.uuid(),
 });
 
 const versionQuestionParams = z.object({
-  templateId: z.string().min(1),
-  versionId: z.string().min(1),
+  templateId: z.uuid(),
+  versionId: z.uuid(),
   questionId: z.string().min(1),
 });
 
 const versionSectionParams = z.object({
-  templateId: z.string().min(1),
-  versionId: z.string().min(1),
+  templateId: z.uuid(),
+  versionId: z.uuid(),
   sectionId: z.string().min(1),
 });
 

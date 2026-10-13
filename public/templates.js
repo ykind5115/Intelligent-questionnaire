@@ -1,116 +1,45 @@
 /**
  * 模板管理页。
  *
- * 与工作台（app.js）的关系：
- *   工作台负责「用模板做案件」与「从零创建模板」；
- *   本页负责「管理已有的模板」—— 搜索、查看、改名称/描述、删除、发布新版本。
+ * 职责：管理**已有的**模板 —— 搜索、查看结构、改名称/描述、发布/停用、删除。
  *
- * 刻意不引入框架：内网部署无构建链。
- * 所有状态以服务端为准，改完一律重新拉列表，避免前端副本与库不一致。
+ * 与另两页的分工：
+ *   /（下发问卷）    选模板建案件
+ *   /create.html    用 AI 从零创建模板
+ *   /templates.html 管理已有模板（本页）
+ *
+ * 共用工具（api / toast / 用户选择器 / 顶栏）都在 common.js，
+ * 避免三个页面各写一份导致行为漂移。
  */
 
-// ============================================================
-// 状态
-// ============================================================
+import {
+  $,
+  TEMPLATE_STATUS_CLASS,
+  TEMPLATE_STATUS_LABEL,
+  api,
+  button,
+  countSchema,
+  el,
+  fmtTime,
+  initUserPicker,
+  renderNav,
+  toast,
+} from "/common.js";
+
+renderNav("templates");
 
 const state = {
-  userId: null,
-  /** 当前搜索条件 */
   keyword: "",
   status: "",
   page: 1,
   pageSize: 10,
   total: 0,
   items: [],
-  /** 当前选中的模板详情 */
   selected: null,
-  /** 选中模板的版本列表 */
   versions: [],
+  /** 当前用户是否模板管理员（决定写操作是否可用） */
+  isAdmin: false,
 };
-
-const $ = (id) => document.getElementById(id);
-
-function toast(message, isError = false) {
-  const el = $("toast");
-  el.textContent = message;
-  el.className = isError ? "toast error" : "toast";
-  el.hidden = false;
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => {
-    el.hidden = true;
-  }, isError ? 6000 : 3000);
-}
-
-function el(tag, options = {}) {
-  const node = document.createElement(tag);
-  if (options.className) node.className = options.className;
-  if (options.text !== undefined) node.textContent = options.text;
-  if (options.attrs) {
-    for (const [k, v] of Object.entries(options.attrs)) node.setAttribute(k, v);
-  }
-  return node;
-}
-
-/** 统一的 API 调用（与 app.js 同样的鉴权方式） */
-async function api(method, path, body) {
-  const headers = {};
-  if (state.userId) headers["x-user-id"] = state.userId;
-  if (body !== undefined) headers["content-type"] = "application/json";
-
-  const res = await fetch(path, {
-    method,
-    headers,
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
-
-  const text = await res.text();
-  let payload = null;
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = { raw: text };
-    }
-  }
-
-  if (!res.ok) {
-    const err = payload?.error ?? {};
-    const e = new Error(err.message || `HTTP ${res.status}`);
-    e.code = err.code;
-    e.status = res.status;
-    throw e;
-  }
-  return payload ? payload.data : null;
-}
-
-const STATUS_LABEL = {
-  draft: "草稿",
-  published: "已发布",
-  disabled: "已停用",
-};
-
-const STATUS_CLASS = {
-  draft: "warn",
-  published: "ok",
-  disabled: "",
-};
-
-function fmtTime(iso) {
-  if (!iso) return "-";
-  const d = new Date(iso);
-  const p = (n) => String(n).padStart(2, "0");
-  return (
-    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
-    `${p(d.getHours())}:${p(d.getMinutes())}`
-  );
-}
-
-/** 当前用户是否有模板管理权限（用于提前提示，而不是等 403） */
-function isTemplateAdmin() {
-  const sel = $("user-select");
-  const text = sel.options[sel.selectedIndex]?.textContent ?? "";
-  return text.includes("template_admin");
-}
 
 // ============================================================
 // 列表
@@ -130,27 +59,28 @@ async function loadList() {
   try {
     const data = await api(
       "GET",
-      `/api/v1/questionnaire-templates?${params.toString()}`
+      `/api/v1/questionnaire-templates?${params}`
     );
     state.items = data.items ?? [];
     state.total = data.total ?? 0;
-
     $("count-badge").textContent = `共 ${state.total} 个`;
 
     if (state.items.length === 0) {
       const tr = el("tr");
-      const td = el("td", {
-        className: "empty",
-        text: state.keyword ? `没有匹配「${state.keyword}」的模板` : "还没有模板",
-        attrs: { colspan: "6" },
-      });
-      tr.appendChild(td);
+      tr.appendChild(
+        el("td", {
+          className: "empty",
+          text: state.keyword
+            ? `没有匹配「${state.keyword}」的模板`
+            : "还没有模板。可以到「从零创建」用 AI 做一份。",
+          attrs: { colspan: "6" },
+        })
+      );
       tbody.appendChild(tr);
     } else {
       for (const t of state.items) tbody.appendChild(renderRow(t));
     }
 
-    // 分页
     const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
     $("page-info").textContent = `第 ${state.page} / ${pages} 页`;
     $("btn-prev").disabled = state.page <= 1;
@@ -170,14 +100,13 @@ async function loadList() {
 
 function renderRow(t) {
   const tr = el("tr");
-
   tr.appendChild(el("td", { text: t.name }));
 
   const statusTd = el("td");
   statusTd.appendChild(
     el("span", {
-      className: `tag ${STATUS_CLASS[t.status] ?? ""}`,
-      text: STATUS_LABEL[t.status] ?? t.status,
+      className: `tag ${TEMPLATE_STATUS_CLASS[t.status] ?? ""}`,
+      text: TEMPLATE_STATUS_LABEL[t.status] ?? t.status,
     })
   );
   tr.appendChild(statusTd);
@@ -189,13 +118,12 @@ function renderRow(t) {
   tr.appendChild(el("td", { text: fmtTime(t.createdAt) }));
 
   const actions = el("td", { className: "col-actions" });
-  const view = el("button", { className: "btn-ghost", text: "查看" });
-  view.type = "button";
+
+  const view = button("查看", { className: "btn-ghost" });
   view.addEventListener("click", () => selectTemplate(t.id));
   actions.appendChild(view);
 
-  const del = el("button", { className: "btn-ghost danger", text: "删除" });
-  del.type = "button";
+  const del = button("删除", { className: "btn-ghost danger" });
   del.addEventListener("click", () => removeTemplate(t));
   actions.appendChild(del);
 
@@ -226,18 +154,21 @@ function renderDetail() {
   const box = $("detail-body");
   box.textContent = "";
 
+  const badge = $("detail-status");
+
   if (!t) {
-    box.appendChild(el("p", { className: "hint", text: "从左侧列表点一个模板查看详情。" }));
+    box.appendChild(
+      el("p", { className: "hint", text: "从左侧列表点一个模板查看详情。" })
+    );
     $("detail-title").textContent = "模板详情";
-    $("detail-status").textContent = "未选择";
-    $("detail-status").className = "badge";
+    badge.textContent = "未选择";
+    badge.className = "badge";
     return;
   }
 
   $("detail-title").textContent = "模板详情";
-  const badge = $("detail-status");
-  badge.textContent = STATUS_LABEL[t.status] ?? t.status;
-  badge.className = "badge " + (STATUS_CLASS[t.status] ?? "");
+  badge.textContent = TEMPLATE_STATUS_LABEL[t.status] ?? t.status;
+  badge.className = "badge " + (TEMPLATE_STATUS_CLASS[t.status] ?? "");
 
   // ---- 可编辑字段 ----
   const form = el("div", { className: "form" });
@@ -245,6 +176,7 @@ function renderDetail() {
   const nameField = el("label", { className: "field" });
   nameField.appendChild(el("span", { text: "模板名称" }));
   const nameInput = el("input", { attrs: { id: "edit-name", value: t.name } });
+  nameInput.value = t.name;
   nameField.appendChild(nameInput);
   form.appendChild(nameField);
 
@@ -258,18 +190,16 @@ function renderDetail() {
   form.appendChild(descField);
 
   const btnRow = el("div", { className: "form-actions" });
-  const save = el("button", { className: "btn btn-primary", text: "保存" });
-  save.type = "button";
+  const save = button("保存", { className: "btn btn-primary" });
   save.addEventListener("click", saveTemplate);
   btnRow.appendChild(save);
 
-  const reset = el("button", { className: "btn", text: "重置" });
-  reset.type = "button";
+  const reset = button("重置");
   reset.addEventListener("click", renderDetail);
   btnRow.appendChild(reset);
   form.appendChild(btnRow);
 
-  if (!isTemplateAdmin()) {
+  if (!state.isAdmin) {
     form.appendChild(
       el("p", {
         className: "hint",
@@ -293,7 +223,7 @@ function renderDetail() {
   }
   box.appendChild(meta);
 
-  // ---- 版本列表（含发布入口）----
+  // ---- 版本列表 ----
   box.appendChild(el("h3", { className: "sub-title", text: "版本" }));
 
   const vlist = el("div", { className: "version-list" });
@@ -308,8 +238,8 @@ function renderDetail() {
     left.appendChild(el("span", { className: "version-no", text: `v${v.versionNo}` }));
     left.appendChild(
       el("span", {
-        className: `tag ${STATUS_CLASS[v.status] ?? ""}`,
-        text: STATUS_LABEL[v.status] ?? v.status,
+        className: `tag ${TEMPLATE_STATUS_CLASS[v.status] ?? ""}`,
+        text: TEMPLATE_STATUS_LABEL[v.status] ?? v.status,
       })
     );
     if (v.changeNote) {
@@ -319,20 +249,17 @@ function renderDetail() {
 
     const right = el("div", { className: "version-actions" });
 
-    const view = el("button", { className: "btn-ghost", text: "看结构" });
-    view.type = "button";
+    const view = button("看结构", { className: "btn-ghost" });
     view.addEventListener("click", () => showVersionSchema(v.id));
     right.appendChild(view);
 
     if (v.status === "draft") {
-      const pub = el("button", { className: "btn-ghost", text: "发布" });
-      pub.type = "button";
+      const pub = button("发布", { className: "btn-ghost" });
       pub.addEventListener("click", () => publishVersion(v));
       right.appendChild(pub);
     }
     if (v.status === "published") {
-      const dis = el("button", { className: "btn-ghost danger", text: "停用" });
-      dis.type = "button";
+      const dis = button("停用", { className: "btn-ghost danger" });
       dis.addEventListener("click", () => disableVersion(v));
       right.appendChild(dis);
     }
@@ -343,7 +270,7 @@ function renderDetail() {
   box.appendChild(vlist);
 }
 
-/** 看某个版本的结构（只读展示） */
+/** 看某个版本的结构（只读弹窗） */
 async function showVersionSchema(versionId) {
   const t = state.selected;
   if (!t) return;
@@ -352,24 +279,30 @@ async function showVersionSchema(versionId) {
       "GET",
       `/api/v1/questionnaire-templates/${t.id}/versions/${versionId}`
     );
+    const { sections: sectionCount, questions: questionCount } = countSchema(
+      v.schema
+    );
     const sections = v.schema?.sections ?? [];
 
-    const box = el("div", { className: "modal-backdrop" });
+    const backdrop = el("div", { className: "modal-backdrop" });
     const modal = el("div", { className: "modal" });
 
     const head = el("div", { className: "modal-head" });
     head.appendChild(
-      el("h3", { text: `v${v.versionNo} 结构（${sections.length} 个分组）` })
+      el("h3", {
+        text: `v${v.versionNo} 结构（${sectionCount} 个分组 / ${questionCount} 道题）`,
+      })
     );
-    const close = el("button", { className: "btn btn-sm", text: "关闭" });
-    close.type = "button";
-    close.addEventListener("click", () => box.remove());
+    const close = button("关闭", { className: "btn btn-sm" });
+    close.addEventListener("click", () => backdrop.remove());
     head.appendChild(close);
     modal.appendChild(head);
 
     const body = el("div", { className: "modal-body" });
     if (sections.length === 0) {
-      body.appendChild(el("p", { className: "hint", text: "这个版本还没有内容。" }));
+      body.appendChild(
+        el("p", { className: "hint", text: "这个版本还没有内容。" })
+      );
     }
     for (const s of sections) {
       const secBox = el("div", { className: "schema-section" });
@@ -379,18 +312,20 @@ async function showVersionSchema(versionId) {
         const li = el("li");
         li.appendChild(el("span", { text: q.title }));
         li.appendChild(el("span", { className: "tag", text: q.type }));
-        if (q.required) li.appendChild(el("span", { className: "tag required", text: "必填" }));
+        if (q.required) {
+          li.appendChild(el("span", { className: "tag required", text: "必填" }));
+        }
         ul.appendChild(li);
       }
       secBox.appendChild(ul);
       body.appendChild(secBox);
     }
     modal.appendChild(body);
-    box.appendChild(modal);
-    box.addEventListener("click", (e) => {
-      if (e.target === box) box.remove();
+    backdrop.appendChild(modal);
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) backdrop.remove();
     });
-    document.body.appendChild(box);
+    document.body.appendChild(backdrop);
   } catch (e) {
     toast(`载入版本失败：${e.message}`, true);
   }
@@ -427,7 +362,7 @@ async function saveTemplate() {
     renderDetail();
   } catch (e) {
     if (e.code === "PERMISSION_DENIED") {
-      toast("保存需要「模板管理员」账号，请先在左上角切换用户。", true);
+      toast("保存需要「模板管理员」账号，请在右上角切换用户。", true);
     } else {
       toast(`保存失败：${e.message}`, true);
     }
@@ -435,21 +370,15 @@ async function saveTemplate() {
 }
 
 async function removeTemplate(t) {
-  if (
-    !confirm(
-      `确定删除模板「${t.name}」？\n\n` +
-        "· 它的所有版本会一并删除\n" +
-        "· 若已有案件使用过它的版本，会被拒绝（避免案件失去来源依据）"
-    )
-  ) {
-    return;
-  }
+  const ok = window.confirm(
+    `确定删除模板「${t.name}」？\n\n` +
+      "· 它的所有版本会一并删除\n" +
+      "· 若已有案件使用过它的版本，会被拒绝（避免案件失去来源依据）"
+  );
+  if (!ok) return;
 
   try {
-    const data = await api(
-      "DELETE",
-      `/api/v1/questionnaire-templates/${t.id}`
-    );
+    const data = await api("DELETE", `/api/v1/questionnaire-templates/${t.id}`);
     toast(`已删除（连带 ${data.deletedVersions} 个版本）`);
     if (state.selected?.id === t.id) {
       state.selected = null;
@@ -459,10 +388,10 @@ async function removeTemplate(t) {
     await loadList();
   } catch (e) {
     if (e.code === "INVALID_STATUS_TRANSITION") {
-      // 后端把「为什么不能删」讲清楚了，直接透传给用户
+      // 后端把「为什么不能删」讲清楚了，直接透传
       toast(e.message, true);
     } else if (e.code === "PERMISSION_DENIED") {
-      toast("删除需要「模板管理员」账号，请先在左上角切换用户。", true);
+      toast("删除需要「模板管理员」账号，请在右上角切换用户。", true);
     } else {
       toast(`删除失败：${e.message}`, true);
     }
@@ -473,15 +402,12 @@ async function publishVersion(v) {
   const t = state.selected;
   if (!t) return;
 
-  if (
-    !confirm(
-      `把 v${v.versionNo} 发布为正式模板？\n\n` +
-        "· 发布后模板状态变为「已发布」，新案件可以直接选用\n" +
-        "· 该版本不能再修改（要改得新建版本）"
-    )
-  ) {
-    return;
-  }
+  const ok = window.confirm(
+    `把 v${v.versionNo} 发布为正式模板？\n\n` +
+      "· 发布后模板状态变为「已发布」，新案件可以直接选用\n" +
+      "· 该版本不能再修改（要改得新建版本）"
+  );
+  if (!ok) return;
 
   try {
     await api(
@@ -500,7 +426,11 @@ async function disableVersion(v) {
   const t = state.selected;
   if (!t) return;
 
-  if (!confirm(`停用 v${v.versionNo}？停用后不能再用于新建案件。`)) return;
+  const ok = window.confirm(
+    `停用 v${v.versionNo}？停用后不能再用于新建案件。\n` +
+      "（若这是唯一的已发布版本，模板状态会同步变为「已停用」）"
+  );
+  if (!ok) return;
 
   try {
     await api(
@@ -520,35 +450,12 @@ async function disableVersion(v) {
 // ============================================================
 
 async function init() {
-  let users = [];
-  try {
-    const data = await api("GET", "/api/v1/dev/users");
-    users = data.items ?? [];
-  } catch (e) {
-    toast(`无法获取可用账号：${e.message}`, true);
-  }
-
-  const select = $("user-select");
-  select.textContent = "";
-  for (const u of users) {
-    select.appendChild(
-      el("option", {
-        text: `${u.displayName}（${u.roles.join("/")}）`,
-        attrs: { value: u.id },
-      })
-    );
-  }
-
   // 模板管理默认用模板管理员，省得每次手动切
-  const preferred =
-    users.find((u) => u.username === "admin") ?? users[0];
-  if (preferred) {
-    select.value = preferred.id;
-    state.userId = preferred.id;
-  }
+  const picker = await initUserPicker("admin");
+  state.isAdmin = picker.hasRole("template_admin");
 
-  select.addEventListener("change", async () => {
-    state.userId = select.value;
+  picker.onChange(async () => {
+    state.isAdmin = picker.hasRole("template_admin");
     await loadList();
     renderDetail();
   });
@@ -559,7 +466,6 @@ async function init() {
     loadList();
   });
 
-  // 回车即搜
   $("search-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -572,8 +478,6 @@ async function init() {
     state.page = 1;
     loadList();
   });
-
-  $("btn-reload").addEventListener("click", () => loadList());
 
   $("btn-prev").addEventListener("click", () => {
     if (state.page > 1) {

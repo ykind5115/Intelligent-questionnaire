@@ -19,16 +19,16 @@ import { createEditorRouter } from "./editor.controller.js";
 // ============================================================
 
 const createInstanceBody = z.object({
-  templateVersionId: z.string().min(1),
+  templateVersionId: z.uuid(),
   title: z.string().min(1).max(200),
   /** 调查对象基础信息，结构随业务可变 */
   subjectInfo: z.record(z.string(), z.unknown()).optional(),
 });
 
-const instanceParams = z.object({ instanceId: z.string().min(1) });
+const instanceParams = z.object({ instanceId: z.uuid() });
 
 const revisionParams = z.object({
-  instanceId: z.string().min(1),
+  instanceId: z.uuid(),
   revisionNo: z.coerce.number().int().positive(),
 });
 

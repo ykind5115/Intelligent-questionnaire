@@ -57,6 +57,22 @@ const createConversationBody = z.object({
   scene: z.enum(SUPPORTED_SCENES),
   targetType: z.enum(["template", "questionnaire_instance"]).optional(),
   targetId: z.string().min(1).optional(),
+  /**
+   * 仅 create_template 且未给 targetId 时使用：新模板的名称。
+   *
+   * 允许在创建时就定名，避免生成完再去改名 ——
+   * 占位名（带时间戳）在同一时刻多次创建时无法区分。
+   */
+  //
+  // 先 trim 再校验长度：否则 "   " 能过 min(1)，
+  // 到 Service 里被 trim 成空串后又会回落到占位名 ——
+  // 用户以为定了名、实际没定，这种静默降级比直接报错更难查。
+  templateName: z
+    .string()
+    .trim()
+    .min(1, "模板名称不能为空")
+    .max(200)
+    .optional(),
 });
 
 /** 发送消息 */
@@ -71,7 +87,7 @@ const paginationQuery = z.object({
 });
 
 const conversationParams = z.object({
-  id: z.string().min(1),
+  id: z.uuid(),
 });
 
 /**
@@ -154,6 +170,9 @@ function createConversation(
         ? { targetType: body.targetType }
         : {}),
       ...(body.targetId !== undefined ? { targetId: body.targetId } : {}),
+      ...(body.templateName !== undefined
+        ? { templateName: body.templateName }
+        : {}),
     },
     ctx
   );

@@ -8,9 +8,8 @@
   </head>
   <body>
     <header class="topbar">
-      <div class="brand">
-        智能问卷 <span class="brand-sub">模板管理</span>
-      </div>
+      <div class="brand">智能问卷</div>
+      <nav id="nav" class="nav"></nav>
 
       <div class="topbar-controls">
         <label class="field">
@@ -34,8 +33,6 @@
         </label>
 
         <button id="btn-search" class="btn btn-primary">搜索</button>
-        <button id="btn-reload" class="btn">刷新</button>
-        <a class="btn" href="/">← 回到工作台</a>
       </div>
     </header>
 
@@ -46,9 +43,7 @@
       <section class="panel">
         <div class="panel-head">
           <h2>模板列表</h2>
-          <div class="panel-head-right">
-            <span id="count-badge" class="badge">-</span>
-          </div>
+          <span id="count-badge" class="badge">-</span>
         </div>
 
         <div class="table-wrap">
@@ -91,6 +86,6 @@
       </section>
     </main>
 
-    <script src="/templates.js"></script>
+    <script type="module" src="/templates.js"></script>
   </body>
 </html>

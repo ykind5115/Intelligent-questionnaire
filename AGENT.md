@@ -293,12 +293,29 @@ CI 不依赖 `AI_API_KEY`。**需要真实模型验证时**：
 
 ---
 
-## 7. 已知未完成 / 待办
+## 7. 前端结构与已知未完成
 
-- **前端只有两个页面**：`public/index.html`（工作台）、`public/templates.html`（模板管理）。
-  **答卷填写界面与审核界面还没做**，这两步目前只能走 API
-- **SSE 端点已实现**（`POST /ai/conversations/{id}/messages/stream`），
-  前端工作台的对话已接
+### 前端（无构建链，原生 ES 模块）
+
+```text
+public/index.html      下发问卷（首页，/）：搜索选模板 → 建案件
+public/create.html     从零创建：先取名 → AI 对话 → 定稿 → 发布 → 立即建案
+public/templates.html  模板管理：搜索 / 查看结构 / 改名 / 发布 / 停用 / 删除
+public/common.js       三页共用：api / toast / el / 用户选择器 / 顶栏 tab / 格式化
+public/app.css         三页共用样式
+```
+
+三页各自的脚本是 `dispatch.js` / `create.js` / `templates.js`，
+通过 `<script type="module">` 加载。
+
+**共用逻辑必须放进 `common.js`**，不要各页复制一份 ——
+复制出来的版本会行为漂移（本项目已经因为「测试里手搭的 app 与真实 app
+不一致」踩过一次）。`common.js` 是模块作用域，用户 id 用
+`getUserId()` 取，不要挂 `window`。
+
+### 尚未完成
+
+- **答卷填写界面与审核界面还没做**，这两步目前只能走 API
 - **D5 评测用例集**（`tests/fixtures/ai-cases/`，8 条）已建好，
   但**还没用真实模型跑过完整的量化评测**，因此没有成功率数字
 - 结构 V1 **只允许一层 section**（不支持嵌套）

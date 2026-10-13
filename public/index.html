@@ -3,92 +3,69 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>智能问卷 · 工作台</title>
+    <title>下发问卷 · 智能问卷</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
     <header class="topbar">
-      <div class="brand">智能问卷 <span class="brand-sub">工作台</span></div>
+      <div class="brand">智能问卷</div>
+      <nav id="nav" class="nav"></nav>
 
       <div class="topbar-controls">
         <label class="field">
           <span>当前用户</span>
           <select id="user-select"></select>
         </label>
-
         <label class="field grow">
-          <span id="target-label">问卷实例 ID</span>
-          <input id="instance-input" placeholder="粘贴实例 ID，或点右侧「新建实例」" />
+          <span>搜索模板</span>
+          <input id="search-input" placeholder="按模板名称搜索，回车即查" />
         </label>
-
-        <button id="btn-load" class="btn btn-primary">载入</button>
-        <button id="btn-new" class="btn">新建实例</button>
-        <button id="btn-new-template" class="btn">从零创建问卷</button>
-        <a id="link-templates" class="btn" href="/templates.html">模板管理</a>
+        <button id="btn-search" class="btn btn-primary">搜索</button>
       </div>
     </header>
 
     <div id="toast" class="toast" hidden></div>
 
-    <main class="layout">
-      <!-- ============ 左：AI 对话 ============ -->
+    <main class="manage-layout">
+      <!-- ============ 左：选模板 ============ -->
       <section class="panel">
         <div class="panel-head">
-          <h2>AI 助手</h2>
-          <span id="chat-status" class="badge">未连接</span>
+          <h2>选择模板</h2>
+          <span id="count-badge" class="badge">-</span>
         </div>
 
-        <div id="chat-log" class="chat-log">
-          <p class="hint">
-            <b>改现有案件</b>：先载入一个实例，再说你要怎么改。<br />
-            例如：「增加一个『活动轨迹』分组，问一下最近半年去过哪些地方」<br /><br />
-            <b>从零创建问卷</b>：点右上角「从零创建问卷」（需模板管理员账号），
-            然后直接描述你要一份什么样的问卷。<br />
-            建好后点结构树上方的「保存为模板草稿」定稿。
-          </p>
+        <div id="pick-list" class="pick-list">
+          <p class="hint">载入中…</p>
         </div>
 
-        <form id="chat-form" class="chat-form">
-          <textarea
-            id="chat-input"
-            rows="3"
-            placeholder="描述你要做的修改…（Enter 发送，Shift+Enter 换行）"
-          ></textarea>
-          <button id="chat-send" class="btn btn-primary" type="submit">发送</button>
-        </form>
+        <div class="pager">
+          <button id="btn-prev" class="btn btn-sm">上一页</button>
+          <span id="page-info" class="hint">-</span>
+          <button id="btn-next" class="btn btn-sm">下一页</button>
+        </div>
       </section>
 
-      <!-- ============ 右：结构编辑器 ============ -->
+      <!-- ============ 右：建案件 ============ -->
       <section class="panel">
         <div class="panel-head">
-          <h2>问卷结构</h2>
-          <div class="panel-head-right">
-            <span id="revision-badge" class="badge">revision -</span>
-            <span id="instance-badge" class="badge">未载入</span>
-          </div>
+          <h2>新建案件</h2>
+          <span id="picked-badge" class="badge">未选择模板</span>
         </div>
 
-        <div class="toolbar">
-          <button id="btn-add-section" class="btn btn-sm">＋ 新增分组</button>
-          <button id="btn-refresh" class="btn btn-sm">刷新</button>
-          <button id="btn-commit" class="btn btn-sm btn-primary" hidden>
-            保存为模板草稿
-          </button>
-          <button id="btn-publish" class="btn btn-sm btn-primary" hidden>
-            发布为正式模板
-          </button>
-          <span class="spacer"></span>
-          <button id="btn-confirm" class="btn btn-sm">确认问卷</button>
-          <button id="btn-promote" class="btn btn-sm">扶正为模板</button>
-          <button id="btn-withdraw" class="btn btn-sm btn-danger">撤回</button>
+        <div id="detail-body" class="detail">
+          <p class="hint">从左侧选一个模板，然后填案件标题即可创建。</p>
         </div>
 
-        <div id="structure" class="structure">
-          <p class="hint">尚未载入问卷。</p>
+        <div class="form-row">
+          <label class="field grow">
+            <span>案件标题</span>
+            <input id="title-input" placeholder="例如：张三 - 无人机黑飞核查" />
+          </label>
+          <button id="btn-create" class="btn btn-primary" disabled>创建案件</button>
         </div>
       </section>
     </main>
 
-    <script src="/app.js"></script>
+    <script type="module" src="/dispatch.js"></script>
   </body>
 </html>

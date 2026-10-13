@@ -180,6 +180,106 @@ export const questionnaireRepository = {
     return row;
   },
 
+  /**
+   * 列出「可用的已发布模板版本」——用于下发问卷时选模板。
+   *
+   * 为什么是「每个模板只取 current_version_id 指向的那一个」：
+   *   一个模板可能有多条历史已发布版本，但业务语义是「选一个模板」，
+   *   把历史版本全列出来只会让人困惑该选哪个。
+   *   需要看历史版本时走模板详情页。
+   *
+   * 只返回 status = published 的模板，且 current_version_id 非空 ——
+   * 后者是「当前生效版本」的唯一权威来源（publish 时写入、disable 时清空）。
+   */
+  async listCurrentPublishedVersions(
+    query: { keyword?: string },
+    options: { skip: number; take: number }
+  ): Promise<{
+    items: {
+      versionId: string;
+      templateId: string;
+      templateName: string;
+      templateDescription: string | null;
+      versionNo: number;
+      publishedAt: Date;
+      schema: unknown;
+      createdBy: string;
+    }[];
+    total: number;
+  }> {
+    const where = {
+      status: "published" as const,
+      // current_version_id 非空 = 这个模板有正在生效的版本
+      NOT: { currentVersionId: null },
+      ...(query.keyword
+        ? {
+            name: {
+              contains: query.keyword,
+              mode: "insensitive" as const,
+            },
+          }
+        : {}),
+    };
+
+    const [templates, total] = await Promise.all([
+      prisma.questionnaireTemplate.findMany({
+        where,
+        orderBy: { updatedAt: "desc" },
+        skip: options.skip,
+        take: options.take,
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          currentVersionId: true,
+          createdBy: true,
+        },
+      }),
+      prisma.questionnaireTemplate.count({ where }),
+    ]);
+
+    const versionIds = templates
+      .map((t) => t.currentVersionId)
+      .filter((id): id is string => id !== null);
+
+    if (versionIds.length === 0) return { items: [], total };
+
+    const versions = await prisma.questionnaireTemplateVersion.findMany({
+      where: { id: { in: versionIds } },
+      select: {
+        id: true,
+        templateId: true,
+        versionNo: true,
+        // 版本表没有 published_at 字段；用 createdAt 近似。
+        // 语义上「已发布版本的生成时间」足够用，且不引入新的冗余字段。
+        createdAt: true,
+        schema: true,
+      },
+    });
+
+    const byId = new Map(versions.map((v) => [v.id, v]));
+
+    const items = templates.flatMap((t) => {
+      const v = t.currentVersionId ? byId.get(t.currentVersionId) : undefined;
+      // 版本被删/状态不一致时跳过，而不是返回半条记录
+      if (!v) return [];
+      return [
+        {
+          versionId: v.id,
+          templateId: t.id,
+          templateName: t.name,
+          templateDescription: t.description,
+          versionNo: v.versionNo,
+          publishedAt: v.createdAt,
+          schema: v.schema,
+          createdBy: t.createdBy,
+        },
+      ];
+    });
+
+    return { items, total };
+  },
+
   /** 列出实例的修订历史（不含快照内容，避免列表接口过大） */  async listRevisions(
     instanceId: string,
     client: DbClient = prisma
