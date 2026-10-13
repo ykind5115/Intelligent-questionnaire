@@ -57,8 +57,25 @@ export const RESPONSE_READ_ROLES = [
   "dispatcher",
 ] as const;
 
-/** questionnaire_responses.status（04 文档第 27.3 节） */
-export const RESPONSE_STATUSES = ["draft", "submitted", "withdrawn"] as const;
+/**
+ * questionnaire_responses.status 的**全部取值**（04 文档第 26.2 节）。
+ *
+ * - draft      填写中
+ * - submitted  已提交，等待审核
+ * - reviewed   审核通过（由 review 模块写入；此后不再出现在待审核列表）
+ * - withdrawn  因撤回而作废（二次下发会新建 draft，不复用旧的）
+ *
+ * 注意与 RESPONSE_FILLABLE_STATUSES 的区别：
+ *   本常量描述「数据库里可能出现哪些值」，用于校验与文档对照；
+ *   后者只有 draft，用于决定「能不能继续写」。
+ *   早先本常量漏了 reviewed，与实际写入的值不一致（误导性参照），已补。
+ */
+export const RESPONSE_STATUSES = [
+  "draft",
+  "submitted",
+  "reviewed",
+  "withdrawn",
+] as const;
 
 /**
  * 允许「开始填写」（即创建 response）的实例状态。
