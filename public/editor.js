@@ -50,11 +50,51 @@ const state = {
   dragging: null,
   /** 乐观锁：模板草稿用 versionNo（见 questionnaire.service.ts） */
   revision: 1,
+  /**
+   * 预览接口返回的权威题目清单（含分组、题型、选项、分支摘要）。
+   *
+   * 为什么不自己从 state.schema 里算：分支编辑要拿「题型与选项」来决定
+   * value 输入框长什么样，还要拿「不可达题目」做告警。
+   * 这些判断与后端求值必须一致，能读权威数据就不要在前端再推导一遍。
+   */
+  questions: [],
+  unreachable: [],
 };
 
 /** 是否可编辑：草稿 + 模板管理员 */
 function canEdit() {
   return state.versionStatus === "draft" && state.isAdmin;
+}
+
+/**
+ * 载入「结构诊断」：权威题目清单 + 不可达题目 + 分支摘要。
+ *
+ * 失败不影响编辑主体（分支 UI 会退化为「不可用」而不是整页报错）——
+ * 结构与分支是两件事，读不到分支信息也应能继续改题目。
+ */
+async function loadStructureDiagnostics() {
+  if (!state.templateId || !state.versionId) return;
+  try {
+    const data = await api(
+      "GET",
+      `/api/v1/questionnaire-templates/${state.templateId}/versions/${state.versionId}/flow/structure`
+    );
+    state.questions = data.questions ?? [];
+    state.unreachable = data.unreachable ?? [];
+  } catch {
+    state.questions = [];
+    state.unreachable = [];
+  }
+}
+
+/** questionId → 题目（含题型与选项） */
+function questionById(id) {
+  return state.questions.find((q) => q.id === id);
+}
+
+/** 题目标题（找不到时退回 id，便于排查） */
+function questionTitle(id) {
+  return questionById(id)?.title ?? `（已删除的题目 ${id}）`;
 }
 
 const QUESTION_TYPE_LABEL = {
@@ -638,10 +678,22 @@ function renderQuestionRow(section, q, index, editable) {
       })
     );
   }
+
+  // 分支摘要必须显示在题目上：只靠一个「设分支」按钮的话，
+  // 看结构的人不知道这一题会不会跳走、会跳过谁 —— 那恰恰是分支最容易出错的地方。
+  const summary = renderBranchSummary(q);
+  if (summary) main.appendChild(summary);
+
   row.appendChild(main);
 
   const actions = el("div", { className: "q-actions" });
   if (editable) {
+    const branchBtn = button(hasBranch(q) ? "改分支" : "设分支", {
+      className: "btn-ghost btn-sm",
+    });
+    branchBtn.addEventListener("click", () => openBranchEditor(section, q));
+    actions.appendChild(branchBtn);
+
     const edit = button("编辑", { className: "btn-ghost btn-sm" });
     edit.addEventListener("click", () => editQuestion(section, q));
     actions.appendChild(edit);
@@ -701,7 +753,7 @@ function renderSidebar() {
     el("p", {
       className: "hint",
       text: canEdit()
-        ? "拖动左侧的 ⠿ 手柄可以调整分组与题目的顺序；点「编辑」改题目内容。"
+        ? "拖动左侧的 ⠿ 手柄可以调整分组与题目的顺序；点「编辑」改内容，点「设分支」配条件跳题。"
         : "当前为只读视图。",
     })
   );
@@ -710,6 +762,61 @@ function renderSidebar() {
     const addTop = button("+ 添加分组", { className: "btn btn-sm" });
     addTop.addEventListener("click", addSection);
     box.appendChild(addTop);
+  }
+
+  // ---- 结构诊断：不可达题目 ----
+  //
+  // 这是「只读 DAG 预览」里最有价值的一项：不可达的题目意味着
+  // 有题目永远不会被任何人看到，而这在列表视图里**完全看不出来**。
+  // 后端只把它当告警（编辑中间态常见），因此这里也只提示、不阻断。
+  if (state.unreachable.length > 0) {
+    const warn = el("div", { className: "editor-warn" });
+    warn.appendChild(
+      el("div", {
+        className: "editor-warn-title",
+        text: `⚠ ${state.unreachable.length} 道题从第一题出发走不到`,
+      })
+    );
+    warn.appendChild(
+      el("p", {
+        className: "hint",
+        text: "这些题目永远不会被任何人看到。检查一下是不是某条分支把它们整段跳过了。",
+      })
+    );
+    for (const id of state.unreachable) {
+      warn.appendChild(el("div", { className: "branch-line", text: `· ${questionTitle(id)}` }));
+    }
+    // 点一下能定位到该题（滚动过去并高亮）
+    warn.addEventListener("click", () => {
+      const first = state.unreachable[0];
+      if (!first) return;
+      const node = document.querySelector(`[data-question-id="${first}"]`);
+      if (node) {
+        node.scrollIntoView({ behavior: "smooth", block: "center" });
+        node.classList.add("q-card-flash");
+        setTimeout(() => node.classList.remove("q-card-flash"), 1600);
+      }
+    });
+    box.appendChild(warn);
+  }
+
+  // ---- 分支概况 ----
+  const branching = state.questions.filter((x) => hasBranch(x));
+  if (state.questions.length > 0) {
+    const info = el("div", { className: "editor-side-block" });
+    const withDefaultEnd = state.questions.filter(
+      (x) => x.defaultNext === null
+    ).length;
+    info.appendChild(
+      el("p", {
+        className: "hint",
+        text:
+          branching.length === 0
+            ? "这份问卷还没有任何分支，所有人都会答完所有题。"
+            : `${branching.length} 道题带分支${withDefaultEnd > 0 ? `，其中 ${withDefaultEnd} 道声明了终点` : ""}。`,
+      })
+    );
+    box.appendChild(info);
   }
 
   if (state.versionId) {
@@ -898,6 +1005,472 @@ async function removeQuestion(q) {
 }
 
 // ============================================================
+// 分支配置（决策 D16）
+// ============================================================
+
+const OPERATOR_LABEL = {
+  eq: "等于",
+  ne: "不等于",
+  in: "属于（任一）",
+  not_in: "不属于（全部都不是）",
+  is_answered: "已作答",
+  is_empty: "未作答",
+};
+
+/** 不需要 value 的操作符 */
+const VALUELESS_OPERATORS = ["is_answered", "is_empty"];
+/** 需要「集合」形态 value 的操作符 */
+const SET_OPERATORS = ["in", "not_in"];
+
+function hasBranch(q) {
+  return (q.branches?.length ?? 0) > 0 || q.defaultNext !== undefined;
+}
+
+/** 把一条规则的 value 渲染成人话 */
+function describeValue(rule) {
+  const { op, questionId, value } = rule.when;
+  const target = questionById(questionId);
+
+  if (VALUELESS_OPERATORS.includes(op)) return "";
+
+  if (Array.isArray(value)) {
+    const labels = value.map((v) => {
+      const opt = target?.options?.find((o) => o.id === String(v));
+      return opt ? opt.label : String(v);
+    });
+    return `「${labels.join(" / ")}」`;
+  }
+  if (typeof value === "boolean") return value ? "是" : "否";
+  const opt = target?.options?.find((o) => o.id === String(value));
+  return `「${opt ? opt.label : String(value)}」`;
+}
+
+/**
+ * 题目的分支摘要（显示在题目行内）。
+ *
+ * 目的：让「读完这份问卷」不必逐题点开 ——
+ * 分支跳错是**在数据里很难发现**的那类问题，因此结构视图必须自己讲清楚。
+ */
+function renderBranchSummary(q) {
+  if (!hasBranch(q)) return null;
+
+  const box = el("div", { className: "q-branch-summary" });
+
+  for (const rule of q.branches ?? []) {
+    const line = el("div", { className: "branch-line" });
+    line.appendChild(el("span", { className: "branch-if", text: "如果" }));
+    line.appendChild(
+      el("span", { text: `「${questionTitle(rule.when.questionId)}」` })
+    );
+    line.appendChild(
+      el("span", {
+        className: "branch-op",
+        text: `${OPERATOR_LABEL[rule.when.op] ?? rule.when.op} ${describeValue(rule)}`.trim(),
+      })
+    );
+    line.appendChild(el("span", { className: "branch-arrow", text: "→ 跳到" }));
+    line.appendChild(el("span", { text: `「${questionTitle(rule.goTo)}」` }));
+    box.appendChild(line);
+  }
+
+  const fallback = el("div", { className: "branch-line fallback" });
+  if (q.defaultNext === null) {
+    fallback.appendChild(el("span", { text: "否则：本题作答后问卷结束" }));
+  } else if (typeof q.defaultNext === "string") {
+    fallback.appendChild(el("span", { text: "否则：跳到" }));
+    fallback.appendChild(el("span", { text: `「${questionTitle(q.defaultNext)}」` }));
+  } else {
+    fallback.appendChild(el("span", { text: "否则：按题目顺序继续" }));
+  }
+  box.appendChild(fallback);
+
+  return box;
+}
+
+/**
+ * 根据被引用题目的题型，构造合适的 value 输入控件。
+ *
+ * 这一步必须有：比较值的类型必须与题型相容，否则后端会以
+ * 「是非题的 value 必须是 true/false」这类错误拒绝。
+ * 让用户手输 JSON 是做不到这一点的。
+ */
+function makeValueControl(question, op, initial) {
+  // 不需要 value
+  if (VALUELESS_OPERATORS.includes(op)) return null;
+
+  // 多选题 + in/not_in → 多选
+  if (question && SET_OPERATORS.includes(op)) {
+    const wrap = el("div", { className: "branch-value-set" });
+    const chosen = new Set(
+      Array.isArray(initial) ? initial.map((v) => String(v)) : []
+    );
+    for (const opt of question.options ?? []) {
+      const id = `val_${opt.id}`;
+      const box = el("input", { attrs: { type: "checkbox", id } });
+      box.checked = chosen.has(opt.id);
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(opt.id);
+        else chosen.delete(opt.id);
+      });
+      const label = el("label", { className: "inline-check" });
+      label.appendChild(box);
+      label.appendChild(el("span", { text: opt.label }));
+      wrap.appendChild(label);
+    }
+    return {
+      node: wrap,
+      read: () => [...chosen],
+      hint: "勾选任意一个命中即算命中（属于）；不属于则要求一个都不包含",
+    };
+  }
+
+  // 是非题 → 是/否
+  if (question?.type === "boolean") {
+    const sel = select(
+      [
+        ["true", "是"],
+        ["false", "否"],
+      ],
+      String(initial ?? true)
+    );
+    return { node: sel, read: () => sel.value === "true" };
+  }
+
+  // 单选 → 选项下拉
+  if (question?.type === "single_choice" && (question.options ?? []).length > 0) {
+    const entries = question.options.map((o) => [o.id, o.label]);
+    const sel = select(entries, String(initial ?? entries[0][0]));
+    return { node: sel, read: () => sel.value };
+  }
+
+  // 数字 → 数字输入
+  if (question?.type === "number") {
+    const input = el("input", { attrs: { type: "number" } });
+    input.value = initial === undefined ? "" : String(initial);
+    return { node: input, read: () => Number(input.value) };
+  }
+
+  // 其余（文本/日期）→ 文本输入
+  const input = textInput(initial === undefined ? "" : String(initial), "比较值");
+  return { node: input, read: () => input.value.trim() };
+}
+
+/**
+ * 分支编辑弹窗：一个题目一个弹窗，整体替换该题的分支。
+ *
+ * 为什么是「整体替换」的交互而不是增量增删：
+ *   后端接口就是整体替换语义（set_question_branch），
+ *   这样「用户在界面上看到的规则」与「存进去的规则」严格一致，
+ *   不会出现「删了一条但顺序错了」这类问题。
+ */
+function openBranchEditor(section, q) {
+  const others = state.questions.filter((x) => x.id !== q.id);
+
+  if (others.length === 0) {
+    toast("还没有别的题目可以作为跳转目标，先加几道题吧", true);
+    return;
+  }
+
+  // 工作副本：确认前不动 state
+  const rules = (q.branches ?? []).map((r) => ({
+    op: r.when.op,
+    questionId: r.when.questionId,
+    value: r.when.value,
+    goTo: r.goTo,
+  }));
+  let defaultNext = q.defaultNext;
+
+  const backdrop = el("div", { className: "modal-backdrop" });
+  const modal = el("div", { className: "modal" });
+
+  const head = el("div", { className: "modal-head" });
+  head.appendChild(el("h3", { text: `分支设置：${q.title}` }));
+  modal.appendChild(head);
+
+  const body = el("div", { className: "modal-body" });
+  body.appendChild(
+    el("p", {
+      className: "hint",
+      text:
+        "按顺序取**第一条命中**的规则；都不命中时看下方的「否则」。\n" +
+        "条件可以引用本题自己 —— 这正是「按本题答案决定是否跳过本题」的常用写法。",
+    })
+  );
+
+  const ruleList = el("div", { className: "branch-rule-list" });
+  body.appendChild(ruleList);
+
+  /** 重画规则行（每行的控件都随「引用题目 + 操作符」联动） */
+  function renderRules() {
+    clear(ruleList);
+
+    if (rules.length === 0) {
+      ruleList.appendChild(
+        el("p", { className: "hint", text: "还没有条件。点下面「添加条件」。" })
+      );
+    }
+
+    rules.forEach((rule, index) => {
+      const row = el("div", { className: "branch-rule-row" });
+
+      row.appendChild(el("span", { className: "branch-rule-index", text: `${index + 1}` }));
+      row.appendChild(el("span", { className: "branch-if", text: "如果" }));
+
+      // 引用哪一题（含本题自己）
+      const qEntries = [
+        [q.id, `${q.title}（本题）`],
+        ...others.map((x) => [x.id, `${x.sectionTitle} / ${x.title}`]),
+      ];
+      const qSel = select(qEntries, rule.questionId || q.id);
+      qSel.addEventListener("change", () => {
+        rule.questionId = qSel.value;
+        rule.value = undefined; // 换了被引用题目，旧值可能不再合法
+        renderRules();
+      });
+      row.appendChild(qSel);
+
+      // 操作符
+      const opSel = select(
+        Object.entries(OPERATOR_LABEL),
+        rule.op
+      );
+      opSel.addEventListener("change", () => {
+        rule.op = opSel.value;
+        rule.value = undefined;
+        renderRules();
+      });
+      row.appendChild(opSel);
+
+      // 比较值（随题型与操作符变化）
+      const target = questionById(rule.questionId || q.id);
+      const control = makeValueControl(target, rule.op, rule.value);
+      if (control) row.appendChild(control.node);
+
+      // 跳转目标
+      row.appendChild(el("span", { className: "branch-arrow", text: "跳到" }));
+      const goSel = select(
+        others.map((x) => [x.id, `${x.sectionTitle} / ${x.title}`]),
+        rule.goTo || others[0].id
+      );
+      row.appendChild(goSel);
+
+      const del = button("删除", { className: "btn-ghost danger btn-sm" });
+      del.addEventListener("click", () => {
+        rules.splice(index, 1);
+        renderRules();
+      });
+      row.appendChild(del);
+
+      // 读取控件值时把「当前选择」定格到 rule 上，供保存时使用
+      rule.__read = () => {
+        const next = {
+          op: opSel.value,
+          questionId: qSel.value,
+          goTo: goSel.value,
+        };
+        if (control) next.value = control.read();
+        return next;
+      };
+
+      ruleList.appendChild(row);
+    });
+
+    // 「否则」——三种语义显式可选，避免用户以为只有「跳走」一种
+    const fallbackRow = el("div", { className: "branch-fallback-row" });
+    fallbackRow.appendChild(el("span", { className: "branch-if", text: "否则" }));
+    const modeSel = select(
+      [
+        ["order", "按题目顺序继续（默认）"],
+        ["end", "本题作答后问卷结束"],
+        ["goto", "跳到指定题目"],
+      ],
+      defaultNext === null ? "end" : typeof defaultNext === "string" ? "goto" : "order"
+    );
+    fallbackRow.appendChild(modeSel);
+
+    const gotoHolder = el("div", { className: "branch-goto-holder" });
+    const gotoEntries = others.map((x) => [x.id, `${x.sectionTitle} / ${x.title}`]);
+    const gotoSel = select(
+      gotoEntries,
+      typeof defaultNext === "string" ? defaultNext : gotoEntries[0][0]
+    );
+    gotoHolder.appendChild(gotoSel);
+    gotoHolder.hidden = modeSel.value !== "goto";
+    modeSel.addEventListener("change", () => {
+      gotoHolder.hidden = modeSel.value !== "goto";
+    });
+    fallbackRow.appendChild(gotoHolder);
+
+    fallbackRow.__read = () => {
+      if (modeSel.value === "order") return undefined;
+      if (modeSel.value === "end") return null;
+      return gotoSel.value;
+    };
+
+    body.appendChild(
+      el("p", {
+        className: "hint",
+        text:
+          "「按题目顺序继续」= 不设置 defaultNext，走下一题；" +
+          "「结束」= 显式声明本题是终点。",
+      })
+    );
+
+    ruleList.appendChild(fallbackRow);
+  }
+
+  renderRules();
+
+  const addRule = button("+ 添加条件", { className: "btn-sm" });
+  addRule.addEventListener("click", () => {
+    rules.push({ op: "eq", questionId: q.id, value: undefined, goTo: others[0].id });
+    renderRules();
+  });
+  body.appendChild(addRule);
+
+  // ---- 只读预览：让「跳过了谁」可见 ----
+  const previewBox = el("div", { className: "branch-preview" });
+  body.appendChild(previewBox);
+
+  async function refreshPreview() {
+    clear(previewBox);
+    previewBox.appendChild(
+      el("p", { className: "hint", text: "预览中…（基于已保存的结构）" })
+    );
+    try {
+      const data = await api(
+        "POST",
+        `/api/v1/questionnaire-templates/${state.templateId}/versions/${state.versionId}/flow/cases`,
+        {
+          cases: [
+            { label: "按顺序（无命中）", answers: {} },
+            { label: "本题选「是」", answers: { [q.id]: true } },
+            { label: "本题选「否」", answers: { [q.id]: false } },
+          ],
+        }
+      );
+      clear(previewBox);
+      previewBox.appendChild(
+        el("p", {
+          className: "hint",
+          text: "预览基于**已保存**的结构；改动要先保存才反映在这里。",
+        })
+      );
+      for (const r of data.results ?? []) {
+        const line = el("div", { className: "branch-line" });
+        line.appendChild(
+          el("span", { className: "branch-op", text: r.label ?? "情形" })
+        );
+        if (r.error) {
+          line.appendChild(
+            el("span", { className: "branch-error", text: `⚠ ${r.error}` })
+          );
+        } else {
+          line.appendChild(
+            el("span", {
+              text: r.questionIds.map((id) => questionTitle(id)).join(" → "),
+            })
+          );
+        }
+        previewBox.appendChild(line);
+      }
+    } catch (e) {
+      clear(previewBox);
+      previewBox.appendChild(
+        el("p", { className: "hint", text: `预览失败：${e.message}` })
+      );
+    }
+  }
+
+  modal.appendChild(body);
+
+  const footer = el("div", { className: "modal-foot" });
+  const cancel = button("取消");
+  const clearBtn = button("清除分支");
+  const save = button("保存", { className: "btn btn-primary" });
+  footer.appendChild(clearBtn);
+  footer.appendChild(cancel);
+  footer.appendChild(save);
+  modal.appendChild(footer);
+
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+
+  const close = () => backdrop.remove();
+
+  cancel.addEventListener("click", close);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close();
+  });
+
+  clearBtn.addEventListener("click", async () => {
+    if (!window.confirm(`清除「${q.title}」的全部分支设置？`)) return;
+    const ok = await callApi(
+      "PATCH",
+      `/questions/${encodeURIComponent(q.id)}/branch`,
+      { branches: [] }
+    );
+    if (ok !== null) {
+      toast("已清除分支");
+      close();
+    }
+  });
+
+  save.addEventListener("click", async () => {
+    // 从控件读回最终值（用户在行内改过的都定格在 __read 上）
+    const branches = rules.map((r) => {
+      const read = r.__read ? r.__read() : r;
+      return {
+        when: {
+          op: read.op,
+          questionId: read.questionId,
+          ...(read.value !== undefined ? { value: read.value } : {}),
+        },
+        goTo: read.goTo,
+      };
+    });
+    const fallback = ruleList.querySelector(".branch-fallback-row");
+    const nextDefault = fallback && fallback.__read ? fallback.__read() : undefined;
+
+    // 无 value 的操作符不该带 value；有 value 的必须带 —— 这里做一次本地拦截，
+    // 省掉一次「提交后才知道」的往返
+    for (const b of branches) {
+      const needsValue = !VALUELESS_OPERATORS.includes(b.when.op);
+      if (needsValue && b.when.value === undefined) {
+        toast(
+          `条件「${OPERATOR_LABEL[b.when.op]}」需要填写比较值`,
+          true
+        );
+        return;
+      }
+      if (
+        Array.isArray(b.when.value) &&
+        b.when.value.length === 0 &&
+        SET_OPERATORS.includes(b.when.op)
+      ) {
+        toast("「属于/不属于」至少勾选一个选项", true);
+        return;
+      }
+    }
+
+    const payload = { branches };
+    if (nextDefault !== undefined) payload.defaultNext = nextDefault;
+
+    const ok = await callApi(
+      "PATCH",
+      `/questions/${encodeURIComponent(q.id)}/branch`,
+      payload
+    );
+    if (ok !== null) {
+      toast("分支已保存");
+      close();
+    }
+  });
+
+  refreshPreview();
+}
+
+// ============================================================
 // 拖拽落点计算
 // ============================================================
 
@@ -1032,11 +1605,15 @@ async function reloadSchema() {
 
 async function loadAll() {
   await reloadSchema();
+  // 结构诊断要在 schema 之后：它带的是权威题目清单与分支摘要
+  await loadStructureDiagnostics();
 
   const publishBtn = $("btn-publish");
   if (publishBtn) {
     publishBtn.hidden = !(state.versionStatus === "draft" && state.isAdmin);
   }
+
+  render();
 }
 
 /** 空白模板：建模板 + 建空草稿版本，然后进入编辑 */

@@ -17,8 +17,7 @@ import { validate, validatedQuery } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireSchema } from "../../questionnaire/schema/questionnaire.schema.js";
 import { templateService } from "../../questionnaire/service/template.service.js";
-import { createTemplateEditorRouter } from "./editor.controller.js";
-
+import { createTemplateEditorRouter, createFlowPreviewRouter } from "./editor.controller.js";
 // ============================================================
 // 请求 Schema
 // ============================================================
@@ -370,6 +369,9 @@ export function createTemplateRouter(): Router {
  */
 export function createTemplateRouterWithEditor(): Router {
   const router = createTemplateRouter();
+  // 只读的流程预览（结构与候选答案 → 路径）。放在写操作之前注册，
+  // 路径更长因此不会与 /:templateId 之类冲突，但顺序更明确也更安全。
+  router.use("/", createFlowPreviewRouter());
   router.use("/", createTemplateEditorRouter());
   return router;
 }

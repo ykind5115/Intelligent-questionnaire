@@ -27,6 +27,11 @@ import { asyncHandler } from "../../../app/error-handler.js";
 import { validate, validatedQuery } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireService } from "../service/questionnaire.service.js";
+import {
+  flowPreviewBody,
+  flowPreviewController,
+  flowPreviewParams,
+} from "./flow-preview.controller.js";
 
 // ============================================================
 // 请求 Schema（两套目标共用 body，params 各自不同）
@@ -575,6 +580,35 @@ export function createEditorRouter(): Router {
  * 这正是决策 D3 要的兜底能力（AI 改得不合适时人还能直接改）。
  * 只有 draft 版本可写，发布后的版本会被 Service 拒绝。
  */
+/**
+ * 流程预览子路由（只读）。
+ *
+ * 路径：
+ *   GET  /:templateId/versions/:versionId/flow/structure  结构与不可达诊断
+ *   POST /:templateId/versions/:versionId/flow/cases      按候选答案求路径
+ *
+ * 单独一个 router 而不是塞进 registerOperations：
+ *   那两个入口是「应用一次写操作」，而这里是只读查询，
+ *   请求/响应形状与它们完全不同，混在一起会让 registerOperations 变复杂。
+ */
+export function createFlowPreviewRouter(): Router {
+  const router = Router();
+
+  router.get(
+    "/:templateId/versions/:versionId/flow/structure",
+    validate({ params: versionParams }),
+    flowPreviewController.structure
+  );
+
+  router.post(
+    "/:templateId/versions/:versionId/flow/cases",
+    validate({ params: versionParams, body: flowPreviewBody }),
+    flowPreviewController.cases
+  );
+
+  return router;
+}
+
 export function createTemplateEditorRouter(): Router {
   const router = Router();
 

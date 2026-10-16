@@ -1179,3 +1179,150 @@ textarea:focus {
 .field.field-inline input {
   margin: 0;
 }
+
+/* ============================================================
+   分支（条件跳题）配置与摘要
+   ============================================================ */
+
+/* 题目行内的分支摘要：必须一眼看出「会不会跳走、跳过谁」 */
+.q-branch-summary {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--warn);
+  background: #fffaf0;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.branch-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  line-height: 1.7;
+}
+
+.branch-line.fallback {
+  color: var(--muted);
+}
+
+.branch-if {
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.branch-op {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #fff1d6;
+}
+
+.branch-arrow {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.branch-error {
+  color: var(--danger);
+}
+
+/* 弹窗内的规则行 */
+.branch-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.branch-rule-row,
+.branch-fallback-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.branch-fallback-row {
+  background: #fafbfc;
+  margin-top: 4px;
+}
+
+.branch-rule-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--primary-weak);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 规则行里的下拉不必占满宽度，否则一行放不下 */
+.branch-rule-row select,
+.branch-fallback-row select {
+  max-width: 220px;
+}
+
+.branch-value-set {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.branch-goto-holder {
+  display: inline-flex;
+}
+
+/* 只读预览 */
+.branch-preview {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+/* 侧栏的不可达告警 */
+.editor-warn {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: #fffaf0;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.editor-warn-title {
+  font-weight: 600;
+  color: var(--warn);
+  margin-bottom: 4px;
+}
+
+.editor-side-block {
+  width: 100%;
+}
+
+/* 定位到某题时闪一下，让人知道跳到哪了 */
+.q-card-flash {
+  animation: q-flash 1.6s ease-out;
+}
+
+@keyframes q-flash {
+  0%,
+  100% {
+    background: #fbfdff;
+  }
+  20%,
+  60% {
+    background: #fff4d6;
+  }
+}
