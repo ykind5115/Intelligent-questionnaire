@@ -15,6 +15,7 @@
 import { transaction, type Tx } from "../../../database/transaction.js";
 import { prisma } from "../../../database/client.js";
 import { questionnaireRepository } from "../repository/questionnaire.repository.js";
+import { templateCategoryService } from "./template-category.service.js";
 import { newId } from "../../../shared/utils/id.js";
 import { toJsonValue } from "../../../shared/utils/json.js";
 import {
@@ -36,11 +37,15 @@ export interface TemplateRow {
   id: string;
   name: string;
   description: string | null;
+  /** 所属分类（可空：存量模板与未选分类的模板都是 null） */
+  categoryId: string | null;
   status: string;
   currentVersionId: string | null;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
+  /** 列表/详情带上分类摘要，省掉前端再查一次 */
+  category?: { id: string; code: string; name: string } | null;
 }
 
 export interface TemplateVersionRow {
@@ -89,7 +94,7 @@ export const templateService = {
   // ----------------------------------------------------------
 
   async createTemplate(
-    input: { name: string; description?: string },
+    input: { name: string; description?: string; categoryId?: string },
     ctx: ServiceContext
   ): Promise<TemplateRow> {
     assertTemplateAdmin(ctx);
@@ -97,6 +102,12 @@ export const templateService = {
     const name = input.name?.trim();
     if (!name) {
       throw validationError("模板名称不能为空", { path: "name" });
+    }
+
+    // 分类可选。给了就必须真实存在 —— 否则会写进一个悬空的 category_id，
+    // 之后前端按分类筛选时会「查不到这个模板」而看不出原因。
+    if (input.categoryId !== undefined) {
+      await templateCategoryService.getCategory(input.categoryId);
     }
 
     const id = newId();
@@ -108,18 +119,23 @@ export const templateService = {
         ...(input.description !== undefined
           ? { description: input.description }
           : {}),
+        ...(input.categoryId !== undefined
+          ? { categoryId: input.categoryId }
+          : {}),
         status: "draft",
         createdBy: ctx.userId,
       },
+      include: { category: { select: { id: true, code: true, name: true } } },
     });
   },
 
   async listTemplates(
-    query: { keyword?: string; status?: string },
+    query: { keyword?: string; status?: string; categoryId?: string },
     options: { skip: number; take: number }
   ): Promise<{ items: TemplateRow[]; total: number }> {
     const where = {
       ...(query.status ? { status: query.status } : {}),
+      ...(query.categoryId ? { categoryId: query.categoryId } : {}),
       ...(query.keyword
         ? { name: { contains: query.keyword, mode: "insensitive" as const } }
         : {}),
@@ -131,6 +147,7 @@ export const templateService = {
         orderBy: { createdAt: "desc" },
         skip: options.skip,
         take: options.take,
+        include: { category: { select: { id: true, code: true, name: true } } },
       }),
       prisma.questionnaireTemplate.count({ where }),
     ]);
@@ -141,6 +158,7 @@ export const templateService = {
   async getTemplate(templateId: string): Promise<TemplateRow> {
     const found = await prisma.questionnaireTemplate.findUnique({
       where: { id: templateId },
+      include: { category: { select: { id: true, code: true, name: true } } },
     });
     if (!found) {
       throw new OperationError(
@@ -152,29 +170,45 @@ export const templateService = {
   },
 
   /**
-   * 更新模板的名称 / 描述（模板管理页的「保存」按钮）。
+   * 更新模板的名称 / 描述 / 分类（模板管理页的「保存」按钮）。
    *
-   * 只允许改这两个展示字段：
+   * 只允许改这三个展示/组织字段：
    *   - 结构属于**版本**，改结构必须新建版本，不能在这里偷偷改
    *   - 状态由 publish / disable 流程控制，不接受客户端直接指定
    * 这样模板记录始终只是「元信息」，不承载结构真相。
+   *
+   * `categoryId` 接受 null 表示「清空分类」——
+   * 与 description 同理，若只允许 string，前端就没法把分类取消掉。
    */
   async updateTemplate(
     templateId: string,
-    input: { name?: string; description?: string | null },
+    input: {
+      name?: string;
+      description?: string | null;
+      categoryId?: string | null;
+    },
     ctx: ServiceContext
   ): Promise<TemplateRow> {
     assertTemplateAdmin(ctx);
 
-    if (input.name === undefined && input.description === undefined) {
-      throw validationError("至少要提供 name 或 description 之一", {
-        path: "name",
-      });
+    if (
+      input.name === undefined &&
+      input.description === undefined &&
+      input.categoryId === undefined
+    ) {
+      throw validationError(
+        "至少要提供 name、description 或 categoryId 之一",
+        { path: "name" }
+      );
     }
 
     const name = input.name?.trim();
     if (input.name !== undefined && !name) {
       throw validationError("模板名称不能为空", { path: "name" });
+    }
+
+    if (typeof input.categoryId === "string") {
+      await templateCategoryService.getCategory(input.categoryId);
     }
 
     // 先确认存在（getTemplate 会抛 TEMPLATE_NOT_FOUND）
@@ -187,7 +221,11 @@ export const templateService = {
         ...(input.description !== undefined
           ? { description: input.description }
           : {}),
+        ...(input.categoryId !== undefined
+          ? { categoryId: input.categoryId }
+          : {}),
       },
+      include: { category: { select: { id: true, code: true, name: true } } },
     });
   },
 

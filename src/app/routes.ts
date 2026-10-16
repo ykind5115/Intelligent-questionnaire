@@ -5,6 +5,7 @@
  *
  * 注意各模块路由的挂载前缀：
  *   /api/v1/questionnaire-templates   → 模板
+ *   /api/v1/questionnaire-template-categories → 模板分类
  *   /api/v1/questionnaire-instances   → 实例（含 revisions / confirm / withdraw / promote）
  *   /api/v1/ai                        → AI 会话
  *   /api/v1                          → 下发 / 填写 / 审核
@@ -13,6 +14,7 @@
  */
 import { Router } from "express";
 import { createTemplateRouterWithEditor } from "../modules/questionnaire/controller/template.controller.js";
+import { createTemplateCategoryRouter } from "../modules/questionnaire/controller/template-category.controller.js";
 import { createInstanceRouterWithEditor } from "../modules/questionnaire/controller/instance.controller.js";
 import { createAiRouter } from "../modules/ai/routes.js";
 import { createDispatchRouter } from "../modules/dispatch/routes.js";
@@ -23,6 +25,10 @@ export function createApiRouter(): Router {
   const router = Router();
 
   router.use("/questionnaire-templates", createTemplateRouterWithEditor());
+  router.use(
+    "/questionnaire-template-categories",
+    createTemplateCategoryRouter()
+  );
   router.use("/questionnaire-instances", createInstanceRouterWithEditor());
   router.use("/ai", createAiRouter());
 

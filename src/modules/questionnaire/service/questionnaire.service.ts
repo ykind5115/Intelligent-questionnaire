@@ -503,11 +503,16 @@ export const questionnaireService = {
 
       const instanceId = newId();
 
+      // 可读编号在同一个事务里领取：事务回滚时发号也一并回滚
+      // （见 repository.allocateInstanceNo 的并发取舍说明）
+      const instanceNo = await questionnaireRepository.allocateInstanceNo(tx);
+
       const created = await tx.questionnaireInstance.create({
         data: {
           id: instanceId,
           templateVersionId: version.id,
           title,
+          instanceNo,
           ...(input.subjectInfo !== undefined
             ? { subjectInfo: toJsonValue(input.subjectInfo) }
             : {}),
@@ -533,6 +538,7 @@ export const questionnaireService = {
         id: created.id,
         templateVersionId: created.templateVersionId,
         title: created.title,
+        instanceNo: created.instanceNo,
         status: created.status,
         currentRevision: created.currentRevision,
         currentSchema: instanceSchema,

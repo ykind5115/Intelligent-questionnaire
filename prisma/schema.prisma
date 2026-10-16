@@ -18,6 +18,30 @@ datasource db {
 }
 
 // ============================================================
+// 实例编号计数器（instance_no 的按天发号器）
+// ============================================================
+
+/// 为什么单独建表而不是 `count(*) + 1`：
+///   `count(*)` 在并发下必然撞号（两个事务读到同一个数）；
+///   发号必须「读 + 写」在同一把锁内完成。本表用
+///   `INSERT ... ON CONFLICT (day, scope) DO UPDATE SET current = current + 1`
+///   实现原子自增 —— 同一天的行会被行锁串行化，不同天互不阻塞。
+///   被回滚的事务会消耗掉一个号，因此编号**允许有空洞**（可接受）。
+///
+/// 这是一张**仅内部使用**的表，不对外暴露 API。
+model InstanceNoCounter {
+  /// 当地日期，格式 YYYYMMDD
+  day   String @db.VarChar(8)
+  /// 预留多序列（当前固定 "instance"），便于将来按业务线分号段
+  scope String @default("instance") @db.VarChar(32)
+  /// 当天已发出的最大序号
+  current Int @default(0)
+
+  @@id([day, scope])
+  @@map("instance_no_counters")
+}
+
+// ============================================================
 // 用户与角色（决策 D8：users.roles 数组，不建独立 RBAC 表）
 // ============================================================
 
@@ -49,6 +73,28 @@ model User {
 }
 
 // ============================================================
+// 模板分类（模板的业务域：无人机核查 / 人员调查 / 设备检查 …）
+// ============================================================
+
+/// 分类是模板的**组织维度**，不是版本维度。
+/// 同一分类下可以有多个模板，每个模板各自从 v1 开始版本号 ——
+/// 因此唯一约束在 (template_id, version_no)，**不是** (category_id, version)。
+/// 详见 docs/11-future-capability-plan.md 第 5.1 节。
+model QuestionnaireTemplateCategory {
+  id          String  @id @db.Uuid
+  /// 稳定编码，供程序判断用，如 drone_check
+  code        String  @unique @db.VarChar(64)
+  name        String  @db.VarChar(100)
+  description String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  templates QuestionnaireTemplate[]
+
+  @@map("questionnaire_template_categories")
+}
+
+// ============================================================
 // 模板与模板版本
 // ============================================================
 
@@ -56,6 +102,10 @@ model QuestionnaireTemplate {
   id          String  @id @db.Uuid
   name        String  @db.VarChar(200)
   description String?
+
+  /// 所属分类。**可空**：存量模板建表时没有分类，
+  /// 强制 NOT NULL 会让迁移失败；前端未选分类时也允许留空。
+  categoryId String? @map("category_id") @db.Uuid
 
   /// draft / published / disabled
   status String @default("draft") @db.VarChar(20)
@@ -72,8 +122,12 @@ model QuestionnaireTemplate {
   currentVersion QuestionnaireTemplateVersion? @relation("TemplateCurrentVersion", fields: [currentVersionId], references: [id])
   versions      QuestionnaireTemplateVersion[] @relation("TemplateVersions")
 
+  /// 删除分类前必须先清空引用（数据库层 RESTRICT 兜底，见迁移文件）
+  category QuestionnaireTemplateCategory? @relation(fields: [categoryId], references: [id])
+
   @@index([status])
   @@index([createdBy])
+  @@index([categoryId])
   @@map("questionnaire_templates")
 }
 
@@ -124,6 +178,11 @@ model QuestionnaireInstance {
   templateVersionId String @map("template_version_id") @db.Uuid
 
   title String @db.VarChar(200)
+
+  /// 可读编号，形如 INS-20261015-0001（按天编号，每天从 1 开始）。
+  /// **可空**：存量实例在加列时没有编号，强制 NOT NULL 会让迁移失败。
+  /// 新建实例一律带编号（见 questionnaire.service.ts 的 createInstance）。
+  instanceNo String? @unique @map("instance_no") @db.VarChar(64)
 
   /// 调查对象基础信息（姓名/身份证号/住址等），结构随业务可变
   subjectInfo Json? @map("subject_info")

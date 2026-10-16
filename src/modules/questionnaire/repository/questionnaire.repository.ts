@@ -26,6 +26,8 @@ export interface InstanceRecord {
   id: string;
   templateVersionId: string;
   title: string;
+  /** 可读编号，形如 INS-20261015-0001；存量实例为 null */
+  instanceNo: string | null;
   status: string;
   currentRevision: number;
   currentSchema: QuestionnaireSchema;
@@ -54,6 +56,8 @@ export interface TemplateVersionRecord {
 export interface InstanceListRow {
   id: string;
   title: string;
+  /** 可读编号，形如 INS-20261015-0001；存量实例为 null */
+  instanceNo: string | null;
   status: string;
   currentRevision: number;
   createdBy: string;
@@ -135,10 +139,53 @@ function parseSchema(raw: unknown, subject: string): QuestionnaireSchema {
   return parsed.data;
 }
 
+/** 实例编号的号段名（instance_no_counters.scope），预留将来按业务线分号段 */
+const INSTANCE_NO_SCOPE = "instance";
+
+/**
+ * 取「本地」日期的 YYYYMMDD，作为实例编号里的日期段与发号表的 day。
+ *
+ * 与 ai-conversation.service.ts 的 formatLocalTimestamp 同理：
+ * 不能用 toISOString()，否则东八区用户在夜里会发现编号的日期是「昨天」。
+ */
+function formatDay(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+}
+
 export const questionnaireRepository = {
   // ==========================================================
   // 读取
   // ==========================================================
+
+  /**
+   * 领取一个新的实例编号，形如 `INS-20261015-0001`。
+   *
+   * 为什么不用 `count(*) + 1`：并发下两个事务会读到同一个计数，必然撞号。
+   * 这里用 `INSERT ... ON CONFLICT (day, scope) DO UPDATE SET current = current + 1`
+   * 把「读 + 写」放进同一条语句：同一天的行会被行锁串行化
+   * （并发建案会排队，不会撞号），不同天互不阻塞。
+   *
+   * 已知取舍：**编号允许有空洞**。被回滚的事务已经消耗掉一个号，
+   * 这是「宁可跳号也不重号」的有意选择 —— 重号会被唯一索引拦下并让建案失败。
+   *
+   * 必须在建案事务内调用：事务回滚时计数器自增一并回滚。
+   */
+  async allocateInstanceNo(
+    client: DbClient = prisma,
+    now: Date = new Date()
+  ): Promise<string> {
+    const day = formatDay(now);
+
+    const counter = await client.instanceNoCounter.upsert({
+      where: { day_scope: { day, scope: INSTANCE_NO_SCOPE } },
+      create: { day, scope: INSTANCE_NO_SCOPE, current: 1 },
+      update: { current: { increment: 1 } },
+      select: { current: true },
+    });
+
+    return `INS-${day}-${String(counter.current).padStart(4, "0")}`;
+  },
 
   async findInstanceById(
     id: string,
@@ -153,6 +200,7 @@ export const questionnaireRepository = {
       id: row.id,
       templateVersionId: row.templateVersionId,
       title: row.title,
+      instanceNo: row.instanceNo,
       status: row.status,
       currentRevision: row.currentRevision,
       currentSchema: parseSchema(row.currentSchema, `实例 ${row.id}`),
@@ -401,6 +449,7 @@ export const questionnaireRepository = {
         select: {
           id: true,
           title: true,
+          instanceNo: true,
           status: true,
           currentRevision: true,
           createdBy: true,
@@ -443,6 +492,7 @@ export const questionnaireRepository = {
       items: rows.map((r) => ({
         id: r.id,
         title: r.title,
+        instanceNo: r.instanceNo,
         status: r.status,
         currentRevision: r.currentRevision,
         createdBy: r.createdBy,

@@ -27,22 +27,29 @@ const createTemplateBody = z.object({
   // trim 后校验：纯空格名称在 API 边界就报错，不靠 Service 兜
   name: z.string().trim().min(1, "模板名称不能为空").max(200),
   description: z.string().max(2000).optional(),
+  /** 所属分类（可选）。给了就必须存在，否则 404（见 template.service.ts） */
+  categoryId: z.uuid().optional(),
 });
 
 /**
- * 更新模板：只允许改名称与描述，且至少给一个。
+ * 更新模板：只允许改名称、描述与分类，且至少给一个。
  *
- * description 允许传 null 表示「清空描述」——
- * 若只允许 string，前端就没法把描述删掉（undefined 表示"不改"）。
+ * description / categoryId 允许传 null 表示「清空」——
+ * 若只允许 string，前端就没法把描述删掉、也没法取消分类
+ * （undefined 表示"不改"）。
  */
 const updateTemplateBody = z
   .object({
     name: z.string().min(1).max(200).optional(),
     description: z.string().max(2000).nullable().optional(),
+    categoryId: z.uuid().nullable().optional(),
   })
   .refine(
-    (v) => v.name !== undefined || v.description !== undefined,
-    "至少要提供 name 或 description 之一"
+    (v) =>
+      v.name !== undefined ||
+      v.description !== undefined ||
+      v.categoryId !== undefined,
+    "至少要提供 name、description 或 categoryId 之一"
   );
 
 const listQuery = z.object({
@@ -50,6 +57,8 @@ const listQuery = z.object({
   pageSize: z.coerce.number().int().positive().optional(),
   keyword: z.string().optional(),
   status: z.enum(["draft", "published", "disabled"]).optional(),
+  /** 按分类筛选 */
+  categoryId: z.uuid().optional(),
 });
 
 /** 选模板用：只需要关键字与分页 */
@@ -84,6 +93,8 @@ function toTemplateDto(t: {
   id: string;
   name: string;
   description: string | null;
+  categoryId?: string | null;
+  category?: { id: string; code: string; name: string } | null;
   status: string;
   currentVersionId: string | null;
   createdBy: string;
@@ -94,6 +105,9 @@ function toTemplateDto(t: {
     id: t.id,
     name: t.name,
     description: t.description,
+    // 分类：存量模板为 null；带上摘要省掉前端再查一次
+    categoryId: t.categoryId ?? null,
+    category: t.category ?? null,
     status: t.status,
     currentVersionId: t.currentVersionId,
     createdBy: t.createdBy,
@@ -158,6 +172,9 @@ export function createTemplateRouter(): Router {
         {
           ...(query.keyword !== undefined ? { keyword: query.keyword } : {}),
           ...(query.status !== undefined ? { status: query.status } : {}),
+          ...(query.categoryId !== undefined
+            ? { categoryId: query.categoryId }
+            : {}),
         },
         { skip: pagination.offset, take: pagination.pageSize }
       );
@@ -211,7 +228,7 @@ export function createTemplateRouter(): Router {
 
   // ---- 更新模板（模板管理页的「保存」） ----
   //
-  // 只能改名称与描述：结构属于版本，状态由 publish/disable 控制。
+  // 只能改名称、描述与分类：结构属于版本，状态由 publish/disable 控制。
   router.patch(
     "/:templateId",
     validate({ params: idParams, body: updateTemplateBody }),
@@ -225,6 +242,9 @@ export function createTemplateRouter(): Router {
           ...(body.name !== undefined ? { name: body.name } : {}),
           ...(body.description !== undefined
             ? { description: body.description }
+            : {}),
+          ...(body.categoryId !== undefined
+            ? { categoryId: body.categoryId }
             : {}),
         },
         serviceContextOf(req)

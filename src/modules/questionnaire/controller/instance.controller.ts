@@ -16,6 +16,7 @@ import { asyncHandler } from "../../../app/error-handler.js";
 import { validate, validatedQuery } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireService } from "../service/questionnaire.service.js";
+import { subjectInfoSchema } from "../schema/subject-info.schema.js";
 import { createEditorRouter } from "./editor.controller.js";
 
 // ============================================================
@@ -25,8 +26,13 @@ import { createEditorRouter } from "./editor.controller.js";
 const createInstanceBody = z.object({
   templateVersionId: z.uuid(),
   title: z.string().min(1).max(200),
-  /** 调查对象基础信息，结构随业务可变 */
-  subjectInfo: z.record(z.string(), z.unknown()).optional(),
+  /**
+   * 调查对象 / 核查任务的基础信息。
+   *
+   * 用显式 Schema（而非 z.record）：已知字段有据可依，
+   * 但保留未知字段（见 subject-info.schema.ts 的说明）。
+   */
+  subjectInfo: subjectInfoSchema.optional(),
 });
 
 const instanceParams = z.object({ instanceId: z.uuid() });
@@ -81,6 +87,7 @@ function toInstanceDto(row: {
   id: string;
   templateVersionId: string;
   title: string;
+  instanceNo?: string | null;
   status: string;
   currentRevision: number;
   currentSchema: unknown;
@@ -93,6 +100,8 @@ function toInstanceDto(row: {
     id: row.id,
     templateVersionId: row.templateVersionId,
     title: row.title,
+    // 可读编号：存量实例（本列上线前创建）为 null，前端需容忍
+    instanceNo: row.instanceNo ?? null,
     status: row.status,
     currentRevision: row.currentRevision,
     currentSchema: row.currentSchema,
@@ -115,6 +124,7 @@ function toInstanceDto(row: {
 function toInstanceListDto(row: {
   id: string;
   title: string;
+  instanceNo: string | null;
   status: string;
   currentRevision: number;
   createdBy: string;
@@ -141,6 +151,7 @@ function toInstanceListDto(row: {
   return {
     id: row.id,
     title: row.title,
+    instanceNo: row.instanceNo,
     status: row.status,
     currentRevision: row.currentRevision,
     templateVersionId: row.templateVersionId,
