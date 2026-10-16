@@ -145,9 +145,11 @@ UNIQUE 只作最后一道防线，不依赖它抛异常来触发幂等。
 只在后续版本实现；「更新原模板」维持现状（生成 draft 新版本，需再 publish），暂不改造；
 前端分支编辑为**已确认要做**的独立工作项（倾向拖拽式，分期实施）。
 
-**L2 已落地（2026-10-15）**：与分支无关的四项独立小改进已实现并通过测试 ——
-模板分类（新表 + `templates.category_id` + 筛选）、`subject_info` 显式 Schema、
-实例可读编号 `instance_no`（新表 `instance_no_counters` 按天发号）、
+**L2 已落地（2026-10-15）**：与分支无关的改进已全部实现并通过测试 ——
+模板分类（新表 + `templates.category_id` + 筛选 + **「管理分类」弹窗**）、
+`subject_info` 显式 Schema、
+实例可读编号 `instance_no`（新表 `instance_no_counters` 按天发号，
+**存量实例已用 `scripts/backfill-instance-no.ts` 回填**）、
 建案页不再预填时间戳默认标题。
 迁移 `20261015120000_add_categories_and_instance_no`；明细见
 [11-future-capability-plan.md](11-future-capability-plan.md) 第 5.0 节。

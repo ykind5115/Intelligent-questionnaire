@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.2 |
+| 文档版本 | v1.3 |
 | 编写日期 | 2026-10-15 |
 | 状态 | **部分已实现**：L1（条件分支）未排期；L2 的四项已于 2026-10-15 落地（见 §5.0）。已定事项见 §7 |
 | 决策依据 | [09-review-and-decisions.md](09-review-and-decisions.md) 决策 **D16** |
@@ -289,6 +289,8 @@ V1–V4 放进 `questionnaireSchema` 的 `superRefine`，由既有的 `assertVal
 | 任务业务字段 | `subject_info` 从 `z.record` 改为**显式 Schema**（已知字段 + 保留未知字段） | 无（仅校验层） |
 | 实例可读编号 | `instance_no`，格式 `INS-YYYYMMDD-NNNN`，按天发号 | 新列 + 新表 `instance_no_counters` |
 | 实例标题 | 建案页不再预填「模板名 + 日期」，改用模板名并聚焦等待补全 | 无（仅前端） |
+| 分类管理界面 | 模板页「管理分类」弹窗：新增/改名/删除；被引用的分类禁用删除并显示引用数 | 无 |
+| 存量编号回填 | `scripts/backfill-instance-no.ts` 给存量实例补编号并校准发号器 | 无（数据回填） |
 
 **迁移**：`prisma/migrations/20261015120000_add_categories_and_instance_no`
 （已在本机库执行，7 个模板 / 13 个实例 / 17 条 revision 数据完好）。
@@ -306,10 +308,21 @@ POST   /api/v1/questionnaire-templates                  body 支持 categoryId
 PATCH  /api/v1/questionnaire-templates/:id              body 支持 categoryId（null = 清空）
 ```
 
+**回填脚本** `scripts/backfill-instance-no.ts`（幂等，带 `--dry-run`）：
+
+```bash
+pnpm exec tsx scripts/backfill-instance-no.ts --dry-run   # 先看方案
+pnpm exec tsx scripts/backfill-instance-no.ts             # 执行
+```
+
+编号规则抽在 `operations/backfill-instance-no.ts` 的纯函数 `planInstanceNoBackfill` 里，
+并有单元测试覆盖（11 个用例）—— 脚本本身是**全库扫描**，
+不适合在测试里真跑（那会改动真实数据）。
+
 **已知未做（有意留到后续）**：
-- 分类的**新增/改名/删除只能走接口**，没有界面（模板页有下拉可选，但建不了新分类）；
 - 实例标题仍**不强制**唯一或非默认值，只是去掉了「看起来像填好了」的时间戳默认值；
-- 存量 13 个实例的 `instance_no` 为空（未回填，前端显示「—」）。
+- 分类**没有独立的权限细分**（一律 `template_admin`），也**没有拖拽排序**；
+- 回填只处理了 `instance_no`；`subject_info` 的历史数据未做结构化清洗。
 
 ### 5.1 模板分类（来源明确要求，但优先级低，有触发条件）
 
@@ -428,7 +441,7 @@ PATCH  /api/v1/questionnaire-templates/:id              body 支持 categoryId�
 | 4 | 分支编辑入口是否要做？ | **要做**，前端需新增编辑功能，**倾向拖拽式** | 新增 §4.11，仍需排期 |
 | 5 | 模板分类是否必要？ | **来源明确要求，但优先级低**。库内只有 7 个模板（3 个有业务名），量还不够大；已给出触发条件（见 §5.1） | 暂不实现，触发后再做 |
 
-| 6 | 本轮（2026-10-15）做了哪些？ | **L2 的四项已落地**：模板分类、`subject_info` 显式 Schema、`instance_no` 可读编号、建案标题不再用时间戳默认值。详见 §5.0 | 迁移 `20261015120000_add_categories_and_instance_no` 已在本机库执行 |
+| 6 | 本轮做了哪些？ | **L2 全部落地**：模板分类（含管理界面）、`subject_info` 显式 Schema、`instance_no` 可读编号（含存量回填）、建案标题不再用时间戳默认值。详见 §5.0 | 迁移 `20261015120000_add_categories_and_instance_no` 已在本机库执行 |
 > 来源文档 `文档一.md` 第 47 节写「页面底部按钮（3 个）」但实际列出 4 个（含【取消】），
 > 属笔误，实现时按 4 个处理。
 
@@ -458,12 +471,11 @@ PATCH  /api/v1/questionnaire-templates/:id              body 支持 categoryId�
 
 ## 附：本计划涉及的文件清单
 
-**将新增**
+**将新增（L1，尚未开始）**
 
 ```text
 src/modules/questionnaire/operations/resolve-flow.ts
 src/modules/questionnaire/operations/set-question-branch.ts
-docs/11-future-capability-plan.md          ← 本文档
 ```
 
 **将修改（L1）**
@@ -478,15 +490,28 @@ src/modules/ai/tools/tool-registry.ts
 src/modules/response/service/response.service.ts
 ```
 
-**将修改（L2，各自独立）**
+**L2 实际改动（已完成，2026-10-15）**
 
 ```text
-prisma/schema.prisma  + 新迁移
-src/modules/questionnaire/repository/questionnaire.repository.ts
+prisma/schema.prisma
+prisma/migrations/20261015120000_add_categories_and_instance_no/migration.sql   （新）
+src/app/routes.ts
+src/modules/questionnaire/schema/subject-info.schema.ts                        （新）
+src/modules/questionnaire/service/template-category.service.ts                 （新）
+src/modules/questionnaire/controller/template-category.controller.ts           （新）
 src/modules/questionnaire/service/template.service.ts
 src/modules/questionnaire/service/questionnaire.service.ts
-public/templates.js / public/dispatch.js / public/common.js
-docs/10-database-reference.md
+src/modules/questionnaire/repository/questionnaire.repository.ts
+src/modules/questionnaire/controller/template.controller.ts
+src/modules/questionnaire/controller/instance.controller.ts
+src/modules/questionnaire/operations/backfill-instance-no.ts                   （新，回填纯逻辑）
+scripts/backfill-instance-no.ts                                                （新，一次性脚本）
+scripts/README.md                                                              （新）
+public/dispatch.js / public/instances.html / public/instances.js
+public/templates.html / public/templates.js / public/app.css
+tests/integration/api/template-category-and-instance-no.test.ts                （新）
+tests/unit/questionnaire/backfill-instance-no.test.ts                          （新）
+docs/09-review-and-decisions.md / docs/10-database-reference.md
 ```
 
 **将新增（§4.11 前端分支编辑器，独立工作项）**

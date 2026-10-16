@@ -135,6 +135,7 @@ reviewer         审核已提交的答卷
 7 行。只存**元信息**，结构在版本表里。
 
 > `category_id` 可空：存量 7 个模板在加列时都没有分类，强制 NOT NULL 会让迁移失败。
+> 界面上：模板管理页有「分类」筛选下拉 + 「管理分类」弹窗（新增/改名/删除）。
 > 接口层：创建/更新模板时可传 `categoryId`（传 `null` 表示清空），
 > 列表支持 `?categoryId=` 筛选；响应里带 `category` 摘要（id/code/name）。
 
@@ -187,10 +188,13 @@ reviewer         审核已提交的答卷
 
 ## 4. questionnaire_instances
 
-13 行。一个案件一份。
+14 行。一个案件一份。
 
-> **`instance_no` 可空**：存量实例在加列时没有编号。
-> 新建实例一律带编号；接口返回 `instanceNo`（存量为 `null`，前端需容忍）。
+> **`instance_no` 可空**（历史遗留）：加列时存量实例没有编号，
+> 但**已在 2026-10-15 用 `scripts/backfill-instance-no.ts` 全部回填**，
+> 因此现在库里每个实例都有编号。
+> 列仍保持可空是为了让「加列 -> 回填」这条路径在新环境上可重放，
+> 也为了容忍手工直插数据；接口返回 `instanceNo`（可能为 `null`）。
 > 生成规则与并发取舍见下方 `instance_no_counters` 一节。
 
 | 字段 | 类型 | 可空 | 默认 | 说明 |
@@ -269,6 +273,23 @@ draft ──confirm──> confirmed ──dispatch──> dispatched ──subm
 - `day` 用**本地**日期，不用 UTC（与模板占位名同理，否则东八区夜里会差一天）。
 - 测试会在整套用例结束前把本表**还原**到运行前的状态（见
   `tests/integration/api/template-category-and-instance-no.test.ts`）。
+
+### 存量数据回填
+
+加列时存量实例没有编号，用一次性脚本补齐（幂等，可重复执行）：
+
+```bash
+pnpm exec tsx scripts/backfill-instance-no.ts --dry-run   # 先看方案，不改任何数据
+pnpm exec tsx scripts/backfill-instance-no.ts             # 执行
+```
+
+规则：按**本地日**分组、组内按 `created_at` 升序从 1 编号；
+**已有编号会被计入组内序号**（否则回填值会与它们撞号）；
+回填完把本表 `current` 校准到每组最大序号，否则下一次建案会从 1 重新发号而撞号。
+
+编号规则由 `operations/backfill-instance-no.ts` 的纯函数 `planInstanceNoBackfill` 决定，
+有单元测试覆盖（11 个用例）。**脚本本身是全局扫描，不适合在测试里真跑** ——
+那会连带改动真实数据（包括开发期间手工建的案件）。
 
 ---
 
