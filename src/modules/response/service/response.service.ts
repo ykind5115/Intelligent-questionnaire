@@ -32,6 +32,7 @@ import {
   type QuestionnaireSchema,
   type QuestionType,
 } from "../../questionnaire/schema/questionnaire.schema.js";
+import { resolveFlow } from "../../questionnaire/operations/index.js";
 import type { ServiceContext } from "../../questionnaire/service/questionnaire.service.js";
 
 // ============================================================
@@ -198,6 +199,37 @@ function collectQuestions(
 
   walk(schema.sections);
   return out;
+}
+
+/** 把答案行转成 resolveFlow 需要的映射 */
+function answersToMap(
+  rows: { questionId: string; answer: unknown }[]
+): Record<string, unknown> {
+  const map: Record<string, unknown> = {};
+  for (const r of rows) map[r.questionId] = r.answer;
+  return map;
+}
+
+/**
+ * 求作答路径；**任何异常都退化为「顺序路径」而不是抛错**。
+ *
+ * 为什么不让它抛：读答卷（`getResponse`）是个读操作，
+ * 如果因为结构里存在一个环就让「读已保存的答卷」整体失败，
+ * 用户会连自己填过什么都看不到。写入侧（保存/提交）有结构校验把关，
+ * 这里只是渲染顺序与必填判定，退化处理更稳妥。
+ */
+function safeResolveFlow(
+  schema: QuestionnaireSchema,
+  answers: Record<string, unknown>
+): { steps: { questionId: string }[]; endedBy: "explicit" | "exhausted" } {
+  try {
+    return resolveFlow(schema, answers);
+  } catch {
+    return {
+      steps: collectQuestions(schema).map((q) => ({ questionId: q.id })),
+      endedBy: "exhausted",
+    };
+  }
 }
 
 /**
@@ -433,6 +465,8 @@ async function getOrCreateResponse(
     currentRevision: number;
   };
   schema: QuestionnaireSchema;
+  /** 本次实际作答路径（按分支求值得到），供前端渲染题目顺序与进度 */
+  flow: { questionIds: string[]; endedBy: "explicit" | "exhausted" };
   answers: AnswerRecord[];
 }> {
   assertRole(ctx, RESPONSE_WRITE_ROLES, "填写问卷");
@@ -524,6 +558,27 @@ async function getOrCreateResponse(
       orderBy: { questionId: "asc" },
     });
 
+    // 答案顺序改为**按作答路径**。
+    //
+    // 原先按 questionId 字典序返回，分支下会乱序（q_10 排在 q_2 前面），
+    // 而且跳过的题目会混在中间。这里用 resolveFlow 求出实际路径，
+    // 按路径位置排序；不在路径上的答案（例如改了分支后遗留的旧答案）
+    // 排到最后，不丢弃 —— 数据不能因为排序而消失。
+    const flow = safeResolveFlow(schema, answersToMap(rows));
+    const pathOrder = new Map(
+      flow.steps.map((s, i) => [s.questionId, i] as const)
+    );
+    const orderedRows = [...rows].sort((a, b) => {
+      const ai = pathOrder.get(a.questionId);
+      const bi = pathOrder.get(b.questionId);
+      if (ai === undefined && bi === undefined) {
+        return a.questionId.localeCompare(b.questionId);
+      }
+      if (ai === undefined) return 1;
+      if (bi === undefined) return -1;
+      return ai - bi;
+    });
+
     return {
       response,
       instance: {
@@ -533,7 +588,12 @@ async function getOrCreateResponse(
         currentRevision: instance.currentRevision,
       },
       schema,
-      answers: rows.map((r) => ({
+      /** 本次实际作答路径（前端据此渲染题目顺序与进度） */
+      flow: {
+        questionIds: flow.steps.map((s) => s.questionId),
+        endedBy: flow.endedBy,
+      },
+      answers: orderedRows.map((r) => ({
         questionId: r.questionId,
         answer: r.answer,
         revisionNo: r.revisionNo,
@@ -703,16 +763,23 @@ async function submitResponse(
       );
     }
 
-    // 必填校验：遍历 current_schema 中 required = true 的题目
-    const requiredIds = collectQuestions(schema)
-      .filter((q) => q.required)
-      .map((q) => q.id);
-
+    // 必填校验：只校验**本次作答路径上**的必填题。
+    //
+    // 为什么必须按路径过滤：分支跳过了一道必填题时，它不该阻塞提交 ——
+    // 否则「是否飞过？→ 否」之后那条「飞行地点」的必填就变成死结，
+    // 用户永远交不上卷。这是分支能力落地后必填语义的正确形态。
     const rows = await tx.questionnaireAnswer.findMany({
       where: { responseId },
       select: { questionId: true, answer: true },
     });
     const answered = new Map(rows.map((r) => [r.questionId, r.answer]));
+
+    const flow = safeResolveFlow(schema, answersToMap(rows));
+    const onPath = new Set(flow.steps.map((s) => s.questionId));
+
+    const requiredIds = collectQuestions(schema)
+      .filter((q) => q.required && onPath.has(q.id))
+      .map((q) => q.id);
 
     const missing = requiredIds.filter((id) => {
       if (!answered.has(id)) return true;

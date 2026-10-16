@@ -93,6 +93,11 @@ export const responseController = {
       instanceStatus: result.instance.status,
       revisionNo: result.instance.currentRevision,
       questionnaire: result.schema,
+      /**
+       * 本次实际作答路径（决策 D16）。
+       * 顺序与 `answers` 一致，前端据此渲染题目顺序与进度。
+       */
+      flow: result.flow,
       answers: result.answers.map((a) => ({
         questionId: a.questionId,
         answer: a.answer,

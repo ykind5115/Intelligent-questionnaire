@@ -400,3 +400,104 @@ export const moveQuestionTool = makeTool({
     }
   },
 });
+
+/**
+ * set_question_branch：设置 / 清除跳转分支（决策 D16）。
+ *
+ * 这是 03 文档第 49 节里被推迟的 `conditional_logic`，
+ * 按计划 §4.9 第 5 步把它转为 V1 之后的第 8 个 Tool。
+ *
+ * **整体替换**语义：一次调用给出该题完整的分支列表。
+ * 这样模型不需要「先查现状再增量改」，少一轮往返也少一类不一致。
+ */
+export const setQuestionBranchTool = makeTool({
+  name: "set_question_branch",
+  mutates: true,
+  description:
+    "设置某道题的跳转分支（条件跳题）。当用户要求「如果选 A 就跳到第 N 题」" +
+    "「某题之后直接结束」「按答案走不同分支」时使用。" +
+    "branches 是**完整替换**：这次调用给出的规则就是该题以后的全部规则，" +
+    "所以要先看清现状（get_questionnaire）再决定给什么。" +
+    "按数组顺序取**第一条命中**的规则；都不命中时看 default_next。" +
+    "所有题目 id 必须来自 get_questionnaire 的结果，绝对不要自己编造。" +
+    "op 取值：eq/ne（等于/不等于，配 value）、in/not_in（属于/不属于，value 传数组）、" +
+    "is_answered/is_empty（已答/未答，不要传 value）。" +
+    "注意：跳转不能形成没有出口的环（后端会拒绝）。" +
+    "清除某题的分支：branches 传空数组、且不要传 default_next。",
+  inputSchema: z.object({
+    target_id: targetIdSchema,
+    question_id: z.string().min(1).describe("要设置分支的问题 id"),
+    branches: z
+      .array(
+        z.object({
+          when: z
+            .object({
+              op: z
+                .enum(["eq", "ne", "in", "not_in", "is_answered", "is_empty"])
+                .describe("比较方式"),
+              question_id: z
+                .string()
+                .min(1)
+                .describe("拿哪一道题的答案来比较"),
+              value: z
+                .unknown()
+                .optional()
+                .describe(
+                  "比较值：是非题传 true/false，数字题传数字，" +
+                    "单选传选项 id，多选在 in/not_in 下传选项 id 数组"
+                ),
+            })
+            .describe("命中条件"),
+          go_to: z.string().min(1).describe("命中后跳到哪一题"),
+        })
+      )
+      .optional()
+      .describe("分支规则列表，整体替换；空数组表示清除分支"),
+    default_next: z
+      .string()
+      .nullable()
+      .optional()
+      .describe(
+        "都不命中时去哪一题。传 null 表示「本题作答后问卷结束」；" +
+          "省略表示按题目顺序走下一题"
+      ),
+  }),
+
+  async execute(input, context, deps) {
+    try {
+      assertWritableScene(context);
+      const targetId = resolveTargetId(input.target_id, context);
+      return await applyWrite(
+        {
+          name: "set_question_branch",
+          input: {
+            questionId: input.question_id,
+            ...(input.branches !== undefined
+              ? {
+                  branches: input.branches.map((r) => ({
+                    when: {
+                      op: r.when.op,
+                      questionId: r.when.question_id,
+                      ...(r.when.value !== undefined
+                        ? { value: r.when.value }
+                        : {}),
+                    },
+                    goTo: r.go_to,
+                  })),
+                }
+              : {}),
+            // undefined = 清除，null = 显式终点，两者语义不同，必须原样透传
+            ...(input.default_next !== undefined
+              ? { defaultNext: input.default_next }
+              : {}),
+          },
+        },
+        context,
+        deps,
+        targetId
+      );
+    } catch (error) {
+      return toToolResult(error, context.operationId);
+    }
+  },
+});

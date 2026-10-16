@@ -34,6 +34,7 @@ import {
   removeSection,
   reorderQuestions,
   reorderSections,
+  setQuestionBranch,
   updateQuestion,
   updateSection,
   uuidIdFactory,
@@ -45,6 +46,7 @@ import {
   type RemoveSectionInput,
   type ReorderQuestionsInput,
   type ReorderSectionsInput,
+  type SetQuestionBranchInput,
   type UpdateQuestionInput,
   type UpdateSectionInput,
 } from "../operations/index.js";
@@ -109,7 +111,8 @@ export type QuestionnaireOperationName =
   | "move_question"
   | "remove_section"
   | "reorder_sections"
-  | "reorder_questions";
+  | "reorder_questions"
+  | "set_question_branch";
 
 export type OperationPayload =
   | { name: "add_section"; input: AddSectionInput }
@@ -120,7 +123,8 @@ export type OperationPayload =
   | { name: "move_question"; input: MoveQuestionInput }
   | { name: "remove_section"; input: RemoveSectionInput }
   | { name: "reorder_sections"; input: ReorderSectionsInput }
-  | { name: "reorder_questions"; input: ReorderQuestionsInput };
+  | { name: "reorder_questions"; input: ReorderQuestionsInput }
+  | { name: "set_question_branch"; input: SetQuestionBranchInput };
 
 export interface ApplyResult {
   schema: QuestionnaireSchema;
@@ -188,6 +192,10 @@ export function dispatchOperation(
         schema: r.schema,
         details: { sectionId: r.sectionId, order: r.order },
       };
+    }
+    case "set_question_branch": {
+      const r = setQuestionBranch(schema, payload.input);
+      return { schema: r.schema, details: { question: r.question } };
     }
     default: {
       // 穷尽性检查：新增操作名时这里会编译报错

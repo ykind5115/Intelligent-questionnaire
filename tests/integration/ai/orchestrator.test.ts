@@ -179,8 +179,10 @@ describe("runTurn - 基本循环", () => {
     );
 
     const tools = provider.options[0]?.tools;
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(8);
     expect(tools?.map((t) => t.function.name)).toContain("add_section");
+    // 分支工具也必须发给模型，否则 AI 无法配置跳题（决策 D16）
+    expect(tools?.map((t) => t.function.name)).toContain("set_question_branch");
   });
 });
 

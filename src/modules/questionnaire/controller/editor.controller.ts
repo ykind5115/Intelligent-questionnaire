@@ -167,6 +167,39 @@ const reorderQuestionsBody = z.object({
   expectedRevision: expectedRevisionSchema,
 });
 
+/**
+ * 设置 / 清除某题的跳转分支（决策 D16）。
+ *
+ * 整体替换语义：传空 `branches` 或不传 `defaultNext` 即清除对应字段。
+ * `defaultNext: null` 是**有意义的值**（显式终点），因此不能用
+ * `.optional()` 一概而论 —— zod 里 `null` 与 `undefined` 在此是两种意图。
+ */
+const branchOperator = z.enum([
+  "eq",
+  "ne",
+  "in",
+  "not_in",
+  "is_answered",
+  "is_empty",
+]);
+
+const setBranchBody = z.object({
+  branches: z
+    .array(
+      z.object({
+        when: z.object({
+          op: branchOperator,
+          questionId: z.string().min(1),
+          value: z.unknown().optional(),
+        }),
+        goTo: z.string().min(1),
+      })
+    )
+    .optional(),
+  defaultNext: z.string().min(1).nullable().optional(),
+  expectedRevision: expectedRevisionSchema,
+});
+
 type OperationPayload = Parameters<
   typeof questionnaireService.applyToInstance
 >[1];
@@ -292,6 +325,23 @@ function buildReorderQuestions(
   return {
     name: "reorder_questions",
     input: { sectionId: body.sectionId, questionIds: body.questionIds },
+  };
+}
+
+function buildSetQuestionBranch(
+  questionId: string,
+  body: z.infer<typeof setBranchBody>
+): OperationPayload {
+  return {
+    name: "set_question_branch",
+    input: {
+      questionId,
+      ...(body.branches !== undefined ? { branches: body.branches } : {}),
+      // 注意：undefined 表示「清除」，null 表示「显式终点」，必须原样透传
+      ...(body.defaultNext !== undefined
+        ? { defaultNext: body.defaultNext }
+        : {}),
+    },
   };
 }
 
@@ -422,6 +472,23 @@ function registerOperations(
     asyncHandler(async (req, res) => {
       const body = req.body as z.infer<typeof reorderQuestionsBody>;
       await run(req, res, buildReorderQuestions(body), body.expectedRevision);
+    })
+  );
+
+  // ---- 设置 / 清除跳转分支（决策 D16）----
+  // 必须注册在 `/questions/:questionId` 之前，否则 "branch" 会被当成 id
+  router.patch(
+    `${prefix}/questions/:questionId/branch`,
+    validate({ params: schemas.question, body: setBranchBody }),
+    asyncHandler(async (req, res) => {
+      const { questionId } = req.params as { questionId: string };
+      const body = req.body as z.infer<typeof setBranchBody>;
+      await run(
+        req,
+        res,
+        buildSetQuestionBranch(questionId, body),
+        body.expectedRevision
+      );
     })
   );
 

@@ -96,3 +96,34 @@ export interface ReorderQuestionsInput {
   /** 必须恰好是该分组当前全部问题的一个排列 */
   questionIds: string[];
 }
+
+/**
+ * set_question_branch：设置 / 清除某题的跳转分支。
+ *
+ * 为什么是整体替换而不是增删单条：编辑器（下拉改完保存）与 AI
+ * （一次给出完整意图）都天然产出完整的分支列表；
+ * 增删单条会让前端自己维护下标，两侧不同步时就会写出与用户意图不符的分支。
+ */
+export interface SetQuestionBranchInput {
+  questionId: string;
+  /**
+   * 分支规则。按声明顺序取第一条命中。
+   * 传空数组或省略 = 清除该题的全部分支。
+   */
+  branches?: {
+    when: {
+      op: "eq" | "ne" | "in" | "not_in" | "is_answered" | "is_empty";
+      /** 比较对象：同一份结构内的题目 id */
+      questionId: string;
+      value?: unknown;
+    };
+    goTo: string;
+  }[];
+  /**
+   * 都不命中时去哪一题：
+   *   undefined（省略） = 不定义，按 order 走下一题
+   *   null              = 显式声明「本题是终点，问卷到此结束」
+   *   题目 id           = 跳到该题
+   */
+  defaultNext?: string | null;
+}

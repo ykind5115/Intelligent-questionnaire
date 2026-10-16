@@ -103,8 +103,16 @@ afterAll(async () => {
 // ============================================================
 
 describe("Tool Registry", () => {
-  it("恰好注册 7 个工具（03 文档第 48 节）", () => {
-    expect(ALL_TOOLS).toHaveLength(7);
+  /**
+   * 工具清单是**对问卷的写权限清单**，因此这里逐个断言名字，
+   * 而不是只数个数 —— 数量相同但换掉一个工具，是比多一个更危险的变化。
+   *
+   * 7 个来自 03 文档第 48 节；`set_question_branch` 是决策 D16 之后的第 8 个
+   * （03 文档第 49 节原本把 `conditional_logic` 列为「暂不进入 V1」）。
+   * 若将来再增减，必须同步改这里与 03 文档 —— 这是有意的摩擦。
+   */
+  it("恰好注册 8 个工具（03 第 48 节 7 个 + 决策 D16 的 set_question_branch）", () => {
+    expect(ALL_TOOLS).toHaveLength(8);
     expect(ALL_TOOLS.map((t) => t.name).sort()).toEqual(
       [
         "add_question",
@@ -112,10 +120,19 @@ describe("Tool Registry", () => {
         "get_questionnaire",
         "move_question",
         "remove_question",
+        "set_question_branch",
         "update_question",
         "update_section",
       ].sort()
     );
+  });
+
+  it("set_question_branch 是写入类，且 description 说明了整体替换语义", () => {
+    const tool = toolRegistry.get("set_question_branch");
+    expect(tool).toBeDefined();
+    expect(tool?.mutates).toBe(true);
+    // 整体替换是最容易误用的一点，必须在 description 里讲清
+    expect(tool?.description).toContain("完整替换");
   });
 
   it("不存在宏工具（generate_questionnaire / modify_questionnaire）", () => {
@@ -155,9 +172,9 @@ describe("Tool Registry", () => {
 // ============================================================
 
 describe("LlmToolSpec 生成", () => {
-  it("生成 7 个 OpenAI 兼容的 function 定义", () => {
+  it("生成 8 个 OpenAI 兼容的 function 定义", () => {
     const specs = allLlmToolSpecs();
-    expect(specs).toHaveLength(7);
+    expect(specs).toHaveLength(8);
     for (const s of specs) {
       expect(s.type).toBe("function");
       expect(s.function.name).toBeTruthy();

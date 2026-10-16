@@ -17,6 +17,7 @@ import {
   getQuestionnaireTool,
   moveQuestionTool,
   removeQuestionTool,
+  setQuestionBranchTool,
   updateQuestionTool,
   updateSectionTool,
 } from "./questionnaire.tools.js";
@@ -25,10 +26,16 @@ import { toolFailure } from "./types.js";
 import { questionnaireService } from "../../questionnaire/service/questionnaire.service.js";
 
 /**
- * V1 的 7 个工具。
+ * 工具清单。
  *
- * 与 docs/03-questionnaire_schema_ai_tool_calling .md 第 48 节严格一致：
+ * 前 7 个与 docs/03-questionnaire_schema_ai_tool_calling .md 第 48 节严格一致：
  * 数量与名称都不可随意增减 —— 新增工具意味着新增一类对问卷的写权限。
+ *
+ * `set_question_branch` 是**第 8 个**，依据决策 D16 与
+ * docs/11-future-capability-plan.md §4.9 第 5 步：
+ * 03 文档第 49 节原本把 `conditional_logic` 列为「暂不进入 V1」，
+ * 现在按计划把它转为 V1 之后的首个新增工具。
+ * 因此 03 文档第 48 节的「7 个工具」需要同步更新（见该文档第 48 节台账）。
  */
 export const ALL_TOOLS: readonly ToolDefinition[] = [
   // 读取
@@ -41,6 +48,8 @@ export const ALL_TOOLS: readonly ToolDefinition[] = [
   updateQuestionTool,
   removeQuestionTool,
   moveQuestionTool,
+  // 分支（决策 D16）
+  setQuestionBranchTool,
 ];
 
 /** 工具名 → 定义 */
