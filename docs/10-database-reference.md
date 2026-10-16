@@ -1,7 +1,8 @@
 # 数据库表格与字段速查
 
 本文档是 [04-database_design.md](04-database_design.md)（设计说明书，2947 行）的**精简速查版**，
-内容以**本地实际数据库**为准（PostgreSQL 17，迁移 `20261005034428_init`），
+内容以**本地实际数据库**为准（PostgreSQL 17，迁移 `20261005034428_init`、
+`20261015120000_add_categories_and_instance_no`），
 并标出实现与设计文档的差异。
 
 - 用途：改代码、写查询、排查数据问题时快速对照
@@ -12,7 +13,8 @@
 
 ## 0. 总览
 
-12 张业务表（+1 张 Prisma 迁移记录表），全部主键为 `uuid`，
+14 张业务表（+1 张 Prisma 迁移记录表）。主键基本都是 `uuid`，
+**例外是 `instance_no_counters`**（复合主键 `(day, scope)`，纯发号用）。
 时间字段为 `timestamptz`。核心思路是**关系型数据与动态结构分离**：
 固定的关系（谁、什么状态、属于谁）用列；问卷的题目树用 `jsonb`。
 
@@ -20,9 +22,11 @@
 | --- | --- | --- |
 | 账号 | `users` | 用户与角色 |
 | 模板 | `questionnaire_templates` | 模板（元信息） |
+| 模板 | `questionnaire_template_categories` | 模板分类（业务域） |
 | 模板 | `questionnaire_template_versions` | 模板版本（**结构存在这里**） |
 | 实例 | `questionnaire_instances` | 问卷实例（案件，**当前结构存在这里**） |
 | 实例 | `questionnaire_revisions` | 结构变更的历史快照 |
+| 实例 | `instance_no_counters` | 实例编号的按天发号器（**内部表**，无 API） |
 | AI | `ai_conversations` | 会话 |
 | AI | `ai_messages` | 消息（含 tool 调用/结果） |
 | AI | `ai_tool_executions` | 工具执行审计（幂等依据） |
@@ -34,6 +38,7 @@
 ### 关系主线
 
 ```text
+questionnaire_template_categories 1 ── N questionnaire_templates   （可为空）
 users ──created_by──> questionnaire_templates
                         │ 1:N
                         └──> questionnaire_template_versions
@@ -90,9 +95,48 @@ reviewer         审核已提交的答卷
 
 ---
 
+## 2A. questionnaire_template_categories
+
+0 行起。**模板分类**：按业务域组织模板（无人机核查 / 人员调查 / 设备检查…）。
+
+依据决策 **D16** 与 [11-future-capability-plan.md](11-future-capability-plan.md) 第 5.1 节。
+
+| 字段 | 类型 | 可空 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `id` | uuid | 否 | — | 主键 |
+| `code` | varchar(64) | 否 | — | **唯一**；程序侧引用的稳定编码，如 `drone_check` |
+| `name` | varchar(100) | 否 | — | 展示名 |
+| `description` | text | 是 | — | 描述 |
+| `category_id` | uuid | **是** | — | → `questionnaire_template_categories.id`（RESTRICT） |
+| `created_at` | timestamptz | 否 | now | |
+
+关键点：
+
+- **`code` 的字符集由应用层强制**：只允许小写字母、数字、下划线，且以字母开头（2–64 位）。
+  数据库没有 CHECK 约束 —— 与既有「状态类字段无 CHECK、取值由应用层保证」的做法一致。
+- **不做静默小写化**：`Drone_Check` 会被明确拒绝，而不是悄悄存成 `drone_check`。
+  编码是被代码/脚本引用的契约，静默改写会让引用方对不上。
+- **`code` 不可改**（`PATCH` 不接受该字段）。要换编码就新建分类。
+- **删除策略是 RESTRICT**：仍被模板引用时删除会被应用层拦下并说明有几个模板在用
+  （`templateCategoryService.deleteCategory`）。
+- 读写权限：读任意已鉴权用户；写需要 `template_admin`（分类是全组织共享资产）。
+
+### 与模板的唯一约束关系（容易搞错）
+
+正确约束是 **`UNIQUE (template_id, version_no)`**（在 `questionnaire_template_versions` 上），
+**不是** `UNIQUE (category_id, version)`。
+后者会导致「同一分类下只能存在一个 v1 模板」，是来源提案（`问卷系统数据库设计文档.md:159`）
+里的一处设计错误，D16 明确不采纳。
+
+---
+
 ## 2. questionnaire_templates
 
-6 行。只存**元信息**，结构在版本表里。
+7 行。只存**元信息**，结构在版本表里。
+
+> `category_id` 可空：存量 7 个模板在加列时都没有分类，强制 NOT NULL 会让迁移失败。
+> 接口层：创建/更新模板时可传 `categoryId`（传 `null` 表示清空），
+> 列表支持 `?categoryId=` 筛选；响应里带 `category` 摘要（id/code/name）。
 
 | 字段 | 类型 | 可空 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -143,13 +187,18 @@ reviewer         审核已提交的答卷
 
 ## 4. questionnaire_instances
 
-9 行。一个案件一份。
+13 行。一个案件一份。
+
+> **`instance_no` 可空**：存量实例在加列时没有编号。
+> 新建实例一律带编号；接口返回 `instanceNo`（存量为 `null`，前端需容忍）。
+> 生成规则与并发取舍见下方 `instance_no_counters` 一节。
 
 | 字段 | 类型 | 可空 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
 | `id` | uuid | 否 | — | 主键 |
 | `template_version_id` | uuid | 否 | — | 从哪个模板版本创建（→ RESTRICT） |
 | `title` | varchar(200) | 否 | — | 案件标题 |
+| `instance_no` | varchar(64) | **是** | — | **唯一**；可读编号，如 `INS-20261015-0001` |
 | `subject_info` | jsonb | 是 | — | 调查对象基础信息，结构随业务可变 |
 | `current_schema` | jsonb | 否 | — | **当前结构**；AI/人工的改动都写这里 |
 | `current_revision` | int4 | 否 | 1 | 当前修订号；乐观锁用它 |
@@ -195,6 +244,31 @@ draft ──confirm──> confirmed ──dispatch──> dispatched ──subm
 > - `under_review`（审核中）：只出现在可撤回列表里
 >
 > 若将来引入中间态，这些常量已经就位；现在就当作未使用。
+
+---
+
+## 4A. instance_no_counters
+
+**内部表**，不对应任何 API。`instance_no` 的按天发号器。
+
+| 字段 | 类型 | 可空 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `day` | varchar(8) | 否 | — | 当地日期 `YYYYMMDD`（复合主键之一） |
+| `scope` | varchar(32) | 否 | `instance` | 号段名（复合主键之一），预留按业务线分号段 |
+| `current` | int4 | 否 | 0 | 当天已发出的最大序号 |
+
+编号格式：`INS-<day>-<序号补零 4 位>`，例如 `INS-20261015-0001`。
+
+关键点（**不要改成 count(*)+1**）：
+
+- 发号走 `INSERT ... ON CONFLICT (day, scope) DO UPDATE SET current = current + 1`，
+  同一天的行会被行锁**串行化**。用 `count(*) + 1` 在并发下必然撞号。
+- **编号允许有空洞**：被回滚的事务会消耗掉一个号。这是「宁可跳号也不重号」的有意取舍 ——
+  重号会被唯一索引拦下并让建案失败。
+- 序号超过 9999 时不再补零（变成 5 位），编号仍然唯一。
+- `day` 用**本地**日期，不用 UTC（与模板占位名同理，否则东八区夜里会差一天）。
+- 测试会在整套用例结束前把本表**还原**到运行前的状态（见
+  `tests/integration/api/template-category-and-instance-no.test.ts`）。
 
 ---
 
@@ -430,6 +504,10 @@ withdrawn  因撤回而作废（二次下发会新建一份 draft，不复用旧
 | `questionnaire_template_versions` | `(template_id, version_no)` **UNIQUE** | 版本号唯一 |
 | `questionnaire_templates` | `created_by`、`status` | 筛选 |
 | `questionnaire_templates` | `current_version_id` **UNIQUE** | 一个版本只能是一个模板的当前版本 |
+| `questionnaire_templates` | `category_id` | 按分类筛选模板 |
+| `questionnaire_template_categories` | `code` **UNIQUE** | 编码唯一（程序侧引用依据） |
+| `questionnaire_instances` | `instance_no` **UNIQUE** | 可读编号唯一 |
+| `instance_no_counters` | `(day, scope)` **PK** | 发号器复合主键 |
 | `users` | `username` **UNIQUE** | 登录/鉴权查找 |
 
 ---
@@ -473,6 +551,9 @@ withdrawn  因撤回而作废（二次下发会新建一份 draft，不复用旧
 
    删模板前要先：断开 questionnaire_templates.current_version_id
    （若版本被实例引用，删模板会被应用层拒绝）
+
+   删分类前要先：把引用它的模板 category_id 清空（外键 RESTRICT，
+   应用层会拒绝并告诉你还有几个模板在用）
    ```
 5. **`status` 类字段没有 CHECK 约束**，非法值不会被数据库拦住 ——
    全靠应用层。写测试时不要假设「数据库会拒绝」
@@ -497,6 +578,9 @@ withdrawn  因撤回而作废（二次下发会新建一份 draft，不复用旧
 | 3 | `users.roles` | `NOT NULL` | 可空 | **文档笔误** | ✅ 已订正 04 第 8.2 节并加注 |
 | 4 | `users` GIN 索引 | 建议创建 | 未创建 | **遗留建议** | ✅ 已在 04 第 8.4 节标注「V1 未创建」 |
 | 5 | 04 第 51.2 节 | 「`operation_id` 不加唯一约束」 | `ai_tool_executions.operation_id` **有** UNIQUE | **表述歧义** | ✅ 已限定为「仅指本表」，并记入 **D15** 说明两表的不同取舍 |
+| 7 | 本表新增（2026-10-15） | — | 新增 `questionnaire_template_categories`、
+`instance_no_counters`、`questionnaire_templates.category_id`、
+`questionnaire_instances.instance_no` | **能力扩展**（决策 D16，计划 §5.1/§5.3） |
 | 6 | `RESPONSE_STATUSES` 常量 | — | 曾漏 `reviewed` | **代码不一致** | ✅ 已补齐，并加测试约束「常量必须覆盖会被写入的取值」 |
 
 另外 04 第 2708 行（规则八）的 `under_review` 是**实例**状态，

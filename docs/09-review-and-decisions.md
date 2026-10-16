@@ -35,7 +35,7 @@
 | D13 | 部署与迁移 | **V1 本机跑通**；后期整体迁移到**内网**，届时模型接口替换为自研服务 | 02, 06 |
 | D14 | 审计表如何容纳**人工编辑** | `ai_tool_executions.conversation_id` **改为可空**，并新增 `source`（`ai_tool` / `manual_editor`）与 `model` 两列 | 04 |
 | D15 | `operation_id` 唯一约束的范围 | **只有** `ai_tool_executions.operation_id` 加 UNIQUE；`questionnaire_revisions.operation_id` **不加**（一次操作可能产生多条审计，而 Revision 与 Tool 调用一对一，唯一性由前者保证） | 04 |
-| D16 | 条件分支/跳题与「模板/实例双套 DAG 表」方案 | **不换表**。结构继续存在 `current_schema` / `schema` 的 JSONB 里，条件分支作为**显式实名字段**（`branch`）加进结构，**纯加法、不动表结构**；行式 DAG 邻接表（`template_node/edge`、`instance_node/edge`）**推迟到出现图分析需求时**再评估，且届时必须以 `toSchema()` 投影保住现有 API 契约 | 01, 03, 04, 11 |
+| D16 | 条件分支/跳题与「模板/实例双套 DAG 表」方案 | **不换表**。问卷结构继续存在 `current_schema` / `schema` 的 JSONB 里（**不改既有表的语义**），条件分支作为**显式实名字段**（`branch`）加进结构；行式 DAG 邻接表（`template_node/edge`、`instance_node/edge`）**推迟到出现图分析需求时**再评估，且届时必须以 `toSchema()` 投影保住现有 API 契约。注意：「不换表」**不等于「不加表」** —— 独立的小能力（如分类、编号）用**新增表/列**实现即可 | 01, 03, 04, 11 |
 
 ---
 
@@ -143,8 +143,16 @@ UNIQUE 只作最后一道防线，不依赖它抛异常来触发幂等。
 
 **排期结论（2026-10-15 拍板）**：D16 涉及的 L1（条件分支）**不列入当前版本**，
 只在后续版本实现；「更新原模板」维持现状（生成 draft 新版本，需再 publish），暂不改造；
-模板分类经库内实测判定为**弱需求**，触发条件见 11 第 5.1 节。
 前端分支编辑为**已确认要做**的独立工作项（倾向拖拽式，分期实施）。
+
+**L2 已落地（2026-10-15）**：与分支无关的四项独立小改进已实现并通过测试 ——
+模板分类（新表 + `templates.category_id` + 筛选）、`subject_info` 显式 Schema、
+实例可读编号 `instance_no`（新表 `instance_no_counters` 按天发号）、
+建案页不再预填时间戳默认标题。
+迁移 `20261015120000_add_categories_and_instance_no`；明细见
+[11-future-capability-plan.md](11-future-capability-plan.md) 第 5.0 节。
+注意这里**加了新表新列**，与第 1 条「不换表」不矛盾：不换的是既有表的语义，
+独立能力用新增结构实现是正常做法。
 
 **落地范围**：完整的分阶段计划见
 [11-future-capability-plan.md](11-future-capability-plan.md)。

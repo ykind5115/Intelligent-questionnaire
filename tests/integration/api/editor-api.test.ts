@@ -5,7 +5,7 @@
  * 因此权限、状态冻结、越权、校验规则都自动一致 ——
  * 不需要为「人改问卷」再写一套规则。
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
   apiRequest,
@@ -23,9 +23,50 @@ import { newId } from "../../../src/shared/utils/id.js";
 
 let client: TestHttpClient;
 const createdInstanceIds = new Set<string>();
+/** 改「实例」结构的审计：随实例删除即可（deleteTestInstance 覆盖） */
 const createdTemplateIds = new Set<string>();
-/** 编辑器用例会在实例上留下审计与修订，deleteTestInstance 已覆盖 */
+/**
+ * 本用例开始时就已存在的「模板版本编辑审计」id 快照。
+ *
+ * 为什么要单独处理这类审计：它们的 questionnaire_instance_id 为 **null**
+ * （挂在模板版本上，不属于任何案件），
+ * 因此删实例或删模板版本都带不走它们。
+ * 曾经漏了这一手，导致每跑一次全量测试就留下 9 条无主审计。
+ *
+ * 为什么要快照：不能按「无实例 + 人工编辑」一把梭 ——
+ * 那会把**库里原有**的同类审计（本机开发期间真实产生的）一起删掉，
+ * 破坏用户数据。只删本用例期间新增的（差集）。
+ */
+let auditSnapshot = new Set<string>();
 
+/** 记录当前所有「模板版本编辑审计」的 id */
+async function snapshotTemplateEditAudits(): Promise<void> {
+  const rows = await prisma.aiToolExecution.findMany({
+    where: {
+      questionnaireInstanceId: null,
+      conversationId: null,
+      source: "manual_editor",
+    },
+    select: { id: true },
+  });
+  auditSnapshot = new Set(rows.map((r) => r.id));
+}
+
+/** 删除本用例期间新增的「模板版本编辑审计」（差集） */
+async function deleteNewTemplateEditAudits(): Promise<void> {
+  const rows = await prisma.aiToolExecution.findMany({
+    where: {
+      questionnaireInstanceId: null,
+      conversationId: null,
+      source: "manual_editor",
+    },
+    select: { id: true },
+  });
+  const fresh = rows.map((r) => r.id).filter((id) => !auditSnapshot.has(id));
+  if (fresh.length > 0) {
+    await prisma.aiToolExecution.deleteMany({ where: { id: { in: fresh } } });
+  }
+}
 
 async function cleanup(): Promise<void> {
   for (const id of createdInstanceIds) await deleteTestInstance(id);
@@ -42,10 +83,17 @@ async function cleanup(): Promise<void> {
     await prisma.questionnaireTemplate.deleteMany({ where: { id } });
   }
   createdTemplateIds.clear();
+
+  await deleteNewTemplateEditAudits();
 }
 
 beforeAll(async () => {
   client = await startTestServer();
+});
+
+// 每个用例前记下已有的「模板版本编辑审计」，用例结束后只删新增的
+beforeEach(async () => {
+  await snapshotTemplateEditAudits();
 });
 
 afterEach(async () => {

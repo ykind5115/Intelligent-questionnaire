@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.1 |
+| 文档版本 | v1.2 |
 | 编写日期 | 2026-10-15 |
-| 状态 | **后续版本计划**（未排期，未实现代码）。已定事项见 §7 |
+| 状态 | **部分已实现**：L1（条件分支）未排期；L2 的四项已于 2026-10-15 落地（见 §5.0）。已定事项见 §7 |
 | 决策依据 | [09-review-and-decisions.md](09-review-and-decisions.md) 决策 **D16** |
 | 需求来源 | [文档一.md](文档一.md)、[问卷系统数据库设计文档.md](问卷系统数据库设计文档.md)、[问卷系统数据库模型图.html](问卷系统数据库模型图.html) |
 
@@ -279,7 +279,42 @@ V1–V4 放进 `questionnaireSchema` 的 `superRefine`，由既有的 `assertVal
 
 ## 5. L2：加表/加列类能力（相互独立，可分别上线）
 
+### 5.0 本次已实现（2026-10-15）
+
+本轮落地了 §5.1 / §5.2 / §5.3 与实例标题问题，**全部是加法，未改动任何既有表语义**：
+
+| 项 | 内容 | 数据库变更 |
+| --- | --- | --- |
+| 模板分类 | 新表 + `templates.category_id` + 按分类筛选 + 模板增删改分类 | 新表 `questionnaire_template_categories` |
+| 任务业务字段 | `subject_info` 从 `z.record` 改为**显式 Schema**（已知字段 + 保留未知字段） | 无（仅校验层） |
+| 实例可读编号 | `instance_no`，格式 `INS-YYYYMMDD-NNNN`，按天发号 | 新列 + 新表 `instance_no_counters` |
+| 实例标题 | 建案页不再预填「模板名 + 日期」，改用模板名并聚焦等待补全 | 无（仅前端） |
+
+**迁移**：`prisma/migrations/20261015120000_add_categories_and_instance_no`
+（已在本机库执行，7 个模板 / 13 个实例 / 17 条 revision 数据完好）。
+
+**新增接口**：
+
+```text
+GET    /api/v1/questionnaire-template-categories        列出分类（任意已鉴权用户）
+POST   /api/v1/questionnaire-template-categories        新建分类（template_admin）
+PATCH  /api/v1/questionnaire-template-categories/:id    改名称/描述（不接受改 code）
+DELETE /api/v1/questionnaire-template-categories/:id    删除（仍被模板引用时拒绝）
+
+GET    /api/v1/questionnaire-templates?categoryId=...   模板列表按分类筛选
+POST   /api/v1/questionnaire-templates                  body 支持 categoryId
+PATCH  /api/v1/questionnaire-templates/:id              body 支持 categoryId（null = 清空）
+```
+
+**已知未做（有意留到后续）**：
+- 分类的**新增/改名/删除只能走接口**，没有界面（模板页有下拉可选，但建不了新分类）；
+- 实例标题仍**不强制**唯一或非默认值，只是去掉了「看起来像填好了」的时间戳默认值；
+- 存量 13 个实例的 `instance_no` 为空（未回填，前端显示「—」）。
+
 ### 5.1 模板分类（来源明确要求，但优先级低，有触发条件）
+
+> **已实现。** 下表保留当初「为什么优先级低」的判断依据，以及触发条件 ——
+> 分类表本身不贵，但**要不要往分类里放内容**仍取决于模板数量是否真的变多。
 
 **来源依据（确认过原文，不是本文档自创的需求）**：
 `文档一.md:10` 把「模板分类」列为模板管理页的列表字段，`:54` 要求「另存为新模板」时
@@ -311,7 +346,7 @@ V1–V4 放进 `questionnaireSchema` 的 `superRefine`，由既有的 `assertVal
 而模板命名这个看似更急的问题，核实后**已经解决**（见下方订正）。
 所以分类本身没错，只是现在还不是瓶颈 —— 缺的不是分类，而是**模板数量还不够多**。
 
-**触发条件（满足任一再做）：**
+**触发条件（决定何时才值得往里填分类）：**
 1. 有业务含义的模板数 > 10，下拉选择开始靠眼力筛选；
 2. 出现「按业务类型统计模板使用情况」的需求；
 3. 需要按分类控制可见性（某类模板只对某些角色开放）—— 这属于权限功能，不是分类本身。
@@ -393,6 +428,7 @@ V1–V4 放进 `questionnaireSchema` 的 `superRefine`，由既有的 `assertVal
 | 4 | 分支编辑入口是否要做？ | **要做**，前端需新增编辑功能，**倾向拖拽式** | 新增 §4.11，仍需排期 |
 | 5 | 模板分类是否必要？ | **来源明确要求，但优先级低**。库内只有 7 个模板（3 个有业务名），量还不够大；已给出触发条件（见 §5.1） | 暂不实现，触发后再做 |
 
+| 6 | 本轮（2026-10-15）做了哪些？ | **L2 的四项已落地**：模板分类、`subject_info` 显式 Schema、`instance_no` 可读编号、建案标题不再用时间戳默认值。详见 §5.0 | 迁移 `20261015120000_add_categories_and_instance_no` 已在本机库执行 |
 > 来源文档 `文档一.md` 第 47 节写「页面底部按钮（3 个）」但实际列出 4 个（含【取消】），
 > 属笔误，实现时按 4 个处理。
 
