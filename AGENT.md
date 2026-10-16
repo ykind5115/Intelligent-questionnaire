@@ -321,6 +321,13 @@ public/app.css         四页共用样式
 - **D5 评测用例集**（`tests/fixtures/ai-cases/`，8 条）已建好，
   但**还没用真实模型跑过完整的量化评测**，因此没有成功率数字
 - 结构 V1 **只允许一层 section**（不支持嵌套）
+- **条件分支/跳题尚未实现**（结构里没有任何跳转字段，7 个 Tool 里也没有分支工具）。
+  它是 `01` §17.2 与 `03` §49 明确推迟的既定项，**不是新增需求**；
+  实现方案与分阶段计划见 [docs/11-future-capability-plan.md](docs/11-future-capability-plan.md)，
+  裁决依据是 [09](docs/09-review-and-decisions.md) 的决策 **D16**（结论：**不换表**，
+  分支用显式 `branch` 字段加进现有 JSONB 结构）
+- `docs/` 下的 `文档一.md`、`问卷系统数据库设计文档.md`、`问卷系统数据库模型图.html`
+  是**需求输入**，不在本仓库的编号体系内。它们提出的行式 DAG 邻接表方案**当前不采用**（D16）
 - 连接池上限默认 5（`src/database/client.ts` 里的 `POOL_MAX`，
   可用环境变量 `DB_POOL_MAX` 覆盖）。压测前需要调大
 - `.env.bak-prismadev` 是切库前的备份，已 gitignore，可删

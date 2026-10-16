@@ -35,6 +35,7 @@
 | D13 | 部署与迁移 | **V1 本机跑通**；后期整体迁移到**内网**，届时模型接口替换为自研服务 | 02, 06 |
 | D14 | 审计表如何容纳**人工编辑** | `ai_tool_executions.conversation_id` **改为可空**，并新增 `source`（`ai_tool` / `manual_editor`）与 `model` 两列 | 04 |
 | D15 | `operation_id` 唯一约束的范围 | **只有** `ai_tool_executions.operation_id` 加 UNIQUE；`questionnaire_revisions.operation_id` **不加**（一次操作可能产生多条审计，而 Revision 与 Tool 调用一对一，唯一性由前者保证） | 04 |
+| D16 | 条件分支/跳题与「模板/实例双套 DAG 表」方案 | **不换表**。结构继续存在 `current_schema` / `schema` 的 JSONB 里，条件分支作为**显式实名字段**（`branch`）加进结构，**纯加法、不动表结构**；行式 DAG 邻接表（`template_node/edge`、`instance_node/edge`）**推迟到出现图分析需求时**再评估，且届时必须以 `toSchema()` 投影保住现有 API 契约 | 01, 03, 04, 11 |
 
 ---
 
@@ -93,6 +94,61 @@ ALTER TABLE ai_tool_executions
 UNIQUE 只作最后一道防线，不依赖它抛异常来触发幂等。
 
 ---
+
+## 2.3 D16 落地：条件分支如何实现，以及为什么不换表
+
+**背景**：`docs/` 下新增了三份文档（`文档一.md`、`问卷系统数据库设计文档.md`、
+`问卷系统数据库模型图.html`），提出用「模板/实例双套 DAG 邻接表」
+（`template_node`/`template_edge`/`instance_node`/`instance_edge`）来存问卷结构与分支跳转。
+需要判定：这是对现有设计的**订正**，还是一条**远期演进路线**。
+
+**核实结论**：这三份文档描述的 11 张表里，**7 张的能力现有设计已经具备**，只是表达方式不同：
+
+| 新增文档的表 / 字段 | 现有对应物 | 判定 |
+| --- | --- | --- |
+| `questionnaire_template` + `template_node/edge` | `questionnaire_templates` + `questionnaire_template_versions.schema` | 已有 |
+| 实例 `template_version` 快照 | `questionnaire_instances.template_version_id` | 已有（已发布版本不可变，无需冗余版本号） |
+| `is_modify_template_snapshot` | `current_revision` + `questionnaire_revisions` 不可变快照 | 已有，且可回溯历史 |
+| 「另存为新模板」 | `promoteToTemplate`（D2） | 已有 |
+| 「更新原模板，版本 +1」 | `promoteToTemplate` 生成同模板 `versionNo+1` 草稿版本 | 已有（且更安全：不直接覆盖共享模板） |
+| 答卷两层（主表 + 明细） | `questionnaire_responses` + `questionnaire_answers` | 已有 |
+| 实例状态机 | `draft/confirmed/dispatched/...`（D1） | 已有，比新文档更完整 |
+
+**真正缺失的只有三项**，且都是**纯加法**：
+
+1. **条件分支/跳题** —— 结构里没有任何字段能表达跳转（`questionnaire.schema.ts` 的
+   `questionSchema` 无 `jumpTo`/`condition`/`visible`），7 个 Tool 里也没有分支工具。
+   注意 `conditional_logic` 本就写在 03 第 49 节「暂不进入 V1 的 Tool」，`01` §17.2/§21
+   也把它列在高级问卷逻辑与 V2 —— **它是 V1 已明确推迟的既定项，不是新增需求**。
+2. **模板分类**、**任务业务字段**、`instance_no` 编号、`answer_trace` —— 都是加表/加列。
+3. 现有设计**不需要**换成行式表就能装下以上全部。
+
+**决策**：
+
+1. **不换表。** 结构继续存 `current_schema` / `schema` 的 JSONB。
+   行式 DAG 邻接表推迟到出现**图分析类需求**（跨问卷题目统计、题库、题目复用）时再评估 ——
+   这与 04 第 50 节的既定路线一致（「V1 JSONB → V2/V3 混合模型 → 成熟版本按业务需要拆分」）。
+2. **分支用显式实名字段**（`branch`），**不复用 `metadata`**。
+   `metadata` 目前是「已声明、无人使用」的透传字段，且 Zod 的 `z.object` 默认剥离未知键 ——
+   往 JSONB 手写分支数据会被静默丢弃，必须走显式 schema 定义。
+3. **将来若真要拆表，必须保留 `toSchema()` 投影。**
+   `currentSchema` / `schema` / `schemaSnapshot` 三个字段是**对外契约**
+   （API 响应、模板版本、revision 快照、AI Tool `get_questionnaire`、前端 4 个页面都依赖它）。
+   拆表时若直接改响应形状，会波及 12 个测试文件、前端 4 个页面与既有文档。
+4. **不采纳新文档中两处能力倒退**：
+   - 其 `answer_detail` 只绑实例节点、节点删除后答案成孤儿 —— 必须保留
+     `questionnaire_revisions` 快照与 `questionnaire_answers.revision_no` 这条「当时问的是什么」的追溯链；
+   - 其 `UNIQUE (category_id, version)` 会导致「同一分类下只能有一个 v1 模板」——
+     正确约束是现有的 `UNIQUE (template_id, version_no)`。
+
+**排期结论（2026-10-15 拍板）**：D16 涉及的 L1（条件分支）**不列入当前版本**，
+只在后续版本实现；「更新原模板」维持现状（生成 draft 新版本，需再 publish），暂不改造；
+模板分类经库内实测判定为**弱需求**，触发条件见 11 第 5.1 节。
+前端分支编辑为**已确认要做**的独立工作项（倾向拖拽式，分期实施）。
+
+**落地范围**：完整的分阶段计划见
+[11-future-capability-plan.md](11-future-capability-plan.md)。
+
 ---
 
 # 3. D1 落地：问卷状态与可修改边界
@@ -672,6 +728,8 @@ seed.ts 写入 4 个固定用户（各带一个角色）：
 | --- | --- |
 | `08-ai_agent_prompt_tool_calling.md` | 原为 `07-ai_agent_prompt_tool_calling.md`，与本文档编号冲突，已改为 08 |
 | `09-review-and-decisions.md` | 本文档，评审结论与决策记录 |
+| `11-future-capability-plan.md` | 远期能力整合计划：条件分支（L1）、模板分类/任务台账/编号/轨迹（L2）、行式 DAG 表（L3 触发式）。依据决策 **D16** |
+| `文档一.md` / `问卷系统数据库设计文档.md` / `问卷系统数据库模型图.html` | 需求输入（非本仓库编号体系）。其能力已整合进上文 11，**结论见 D16**：不换表、分支用 `branch` 字段实现 |
 
 ## 11.3 本次修订解决的跨文档冲突
 
