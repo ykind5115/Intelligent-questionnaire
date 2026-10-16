@@ -327,6 +327,15 @@ function renderDetail() {
     view.addEventListener("click", () => showVersionSchema(v.id));
     right.appendChild(view);
 
+    // 人工编辑器入口（决策 D3）。
+    // draft 直接编辑；已发布/已停用版本不可改，提供「编辑为新版本」——
+    // 复制成新草稿再改，原版本不受影响（与后端「只有 draft 可写」一致）。
+    const edit = button(v.status === "draft" ? "编辑" : "编辑为新版本", {
+      className: "btn-ghost",
+    });
+    edit.addEventListener("click", () => openInEditor(v));
+    right.appendChild(edit);
+
     if (v.status === "draft") {
       const pub = button("发布", { className: "btn-ghost" });
       pub.addEventListener("click", () => publishVersion(v));
@@ -342,6 +351,61 @@ function renderDetail() {
     vlist.appendChild(row);
   }
   box.appendChild(vlist);
+}
+
+/**
+ * 在人工编辑器里打开某个版本。
+ *
+ * draft → 直接进编辑器改
+ * 其他 → 先把结构复制成一个新草稿版本，再进编辑器
+ *        （后端只允许写 draft 版本，所以不能直接改已发布版本）
+ */
+async function openInEditor(v) {
+  const t = state.selected;
+  if (!t) return;
+
+  if (v.status === "draft") {
+    location.href = editorUrl(t.id, v.id);
+    return;
+  }
+
+  const ok = window.confirm(
+    `v${v.versionNo} 是「${TEMPLATE_STATUS_LABEL[v.status] ?? v.status}」状态，不能直接修改。\n\n` +
+      "要把它复制成一个新的草稿版本来编辑吗？\n" +
+      "（原版本不受影响，新版本编号 +1）"
+  );
+  if (!ok) return;
+
+  try {
+    const full = await api(
+      "GET",
+      `/api/v1/questionnaire-templates/${t.id}/versions/${v.id}`
+    );
+    const created = await api(
+      "POST",
+      `/api/v1/questionnaire-templates/${t.id}/versions`,
+      {
+        schema: full.schema,
+        changeNote: `基于 v${v.versionNo} 新建草稿`,
+      }
+    );
+    toast(`已新建草稿 v${created.versionNo}，正在打开编辑器…`);
+    location.href = editorUrl(t.id, created.id);
+  } catch (e) {
+    toast(
+      e.code === "PERMISSION_DENIED"
+        ? "新建版本需要「模板管理员」账号，请在右上角切换用户。"
+        : `新建草稿失败：${e.message}`,
+      true
+    );
+  }
+}
+
+function editorUrl(templateId, versionId) {
+  return (
+    `/editor.html?templateId=${encodeURIComponent(templateId)}` +
+    `&versionId=${encodeURIComponent(versionId)}`
+  );
 }
 
 /** 看某个版本的结构（只读弹窗） */

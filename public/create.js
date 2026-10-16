@@ -503,6 +503,12 @@ async function init() {
   await initUserPicker("admin");
 
   $("btn-start").addEventListener("click", startNew);
+
+  // 手工从零搭：不走 AI，直接进编辑器建空白模板（决策 D3 的人工兜底）
+  $("btn-blank").addEventListener("click", () => {
+    location.href = "/editor.html";
+  });
+
   $("btn-refresh").addEventListener("click", refreshResult);
   $("btn-commit").addEventListener("click", commitDraft);
   $("btn-publish").addEventListener("click", publish);

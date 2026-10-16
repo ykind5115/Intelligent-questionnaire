@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>问卷编辑器 · 智能问卷</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">智能问卷</div>
+      <nav id="nav" class="nav"></nav>
+
+      <div class="topbar-controls">
+        <label class="field">
+          <span>当前用户</span>
+          <select id="user-select"></select>
+        </label>
+        <button id="btn-blank" class="btn">+ 新建空白模板</button>
+        <button id="btn-publish" class="btn btn-primary" hidden>
+          发布为正式模板
+        </button>
+      </div>
+    </header>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <main class="editor-layout">
+      <!-- ============ 左：结构画布 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2 id="editor-title">问卷编辑器</h2>
+          <div class="panel-head-right">
+            <span id="editor-status" class="badge">未打开</span>
+          </div>
+        </div>
+
+        <div id="editor-hint" class="editor-banner" hidden></div>
+
+        <div id="editor-canvas" class="editor-canvas">
+          <p class="hint">载入中…</p>
+        </div>
+      </section>
+
+      <!-- ============ 右：侧栏 ============ -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>操作与统计</h2>
+        </div>
+        <div id="editor-side" class="editor-side"></div>
+        <div class="panel-head">
+          <h2>概况</h2>
+        </div>
+        <div id="editor-stats" class="meta-grid"></div>
+      </section>
+    </main>
+
+    <script type="module" src="/editor.js"></script>
+  </body>
+</html>

@@ -957,3 +957,225 @@ textarea:focus {
   gap: 6px;
   align-items: center;
 }
+
+/* ============================================================
+   问卷编辑器（拖拽画布）
+   ============================================================ */
+
+.editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 14px;
+  padding: 14px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .editor-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 只读 / 权限提示条 */
+.editor-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--primary-weak);
+  font-size: 13px;
+}
+
+.editor-canvas {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.editor-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 24px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.editor-add-section {
+  padding: 4px 0;
+}
+
+.editor-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px;
+}
+
+/* ---- 分组卡片 ---- */
+
+.sec-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.sec-card.dragging {
+  opacity: 0.5;
+}
+
+/* 落点指示：拖到上半部 = 插到它前面，下半部 = 插到后面 */
+.sec-card.drop-before {
+  box-shadow: 0 -3px 0 0 var(--primary);
+}
+
+.sec-card.drop-after {
+  box-shadow: 0 3px 0 0 var(--primary);
+}
+
+.sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.sec-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 160px;
+  font-weight: 600;
+}
+
+.sec-index,
+.q-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--primary-weak);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sec-actions,
+.q-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+/* ---- 题目卡片 ---- */
+
+.q-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  min-height: 44px;
+}
+
+.q-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fbfdff;
+}
+
+.q-card.dragging {
+  opacity: 0.5;
+}
+
+.q-card.drop-before {
+  box-shadow: 0 -3px 0 0 var(--primary);
+}
+
+.q-card.drop-after {
+  box-shadow: 0 3px 0 0 var(--primary);
+}
+
+.q-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.q-line1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.q-title {
+  font-weight: 500;
+}
+
+.q-empty {
+  margin: 0;
+  padding: 4px 0;
+}
+
+/* 拖拽手柄：光标提示可拖，触摸端加大命中区 */
+.drag-handle {
+  cursor: grab;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 6px 4px;
+  user-select: none;
+  touch-action: none;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* ---- 选项编辑器 ---- */
+
+.opt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.opt-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.opt-row input {
+  flex: 1;
+  min-width: 120px;
+}
+
+/* 复选框字段：标签与控件同行 */
+.field.field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.field.field-inline input {
+  margin: 0;
+}

@@ -88,6 +88,17 @@ export function el(tag, options = {}) {
   return node;
 }
 
+/**
+ * 清空一个节点的子元素。
+ *
+ * 等价于 `node.textContent = ""`，但用意更清楚：
+ * 重画列表时随处可见，写 `textContent = ""` 容易被误读成「清空文本」。
+ */
+export function clear(node) {
+  if (!node) return;
+  node.textContent = "";
+}
+
 /** 一个按钮（返回元素但未绑定事件，调用方自己绑） */
 export function button(text, { className = "btn" } = {}) {
   const b = el("button", { className, text });
@@ -264,6 +275,7 @@ export const NAV_ITEMS = [
   { href: "/", label: "下发问卷", key: "dispatch" },
   { href: "/instances.html", label: "案件管理", key: "instances" },
   { href: "/create.html", label: "从零创建", key: "create" },
+  { href: "/editor.html", label: "问卷编辑器", key: "editor" },
   { href: "/templates.html", label: "模板管理", key: "templates" },
 ];
 
