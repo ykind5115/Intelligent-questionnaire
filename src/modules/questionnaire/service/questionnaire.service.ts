@@ -31,6 +31,9 @@ import {
   addSection,
   moveQuestion,
   removeQuestion,
+  removeSection,
+  reorderQuestions,
+  reorderSections,
   updateQuestion,
   updateSection,
   uuidIdFactory,
@@ -39,6 +42,9 @@ import {
   type IdFactory,
   type MoveQuestionInput,
   type RemoveQuestionInput,
+  type RemoveSectionInput,
+  type ReorderQuestionsInput,
+  type ReorderSectionsInput,
   type UpdateQuestionInput,
   type UpdateSectionInput,
 } from "../operations/index.js";
@@ -100,7 +106,10 @@ export type QuestionnaireOperationName =
   | "update_section"
   | "update_question"
   | "remove_question"
-  | "move_question";
+  | "move_question"
+  | "remove_section"
+  | "reorder_sections"
+  | "reorder_questions";
 
 export type OperationPayload =
   | { name: "add_section"; input: AddSectionInput }
@@ -108,7 +117,10 @@ export type OperationPayload =
   | { name: "update_section"; input: UpdateSectionInput }
   | { name: "update_question"; input: UpdateQuestionInput }
   | { name: "remove_question"; input: RemoveQuestionInput }
-  | { name: "move_question"; input: MoveQuestionInput };
+  | { name: "move_question"; input: MoveQuestionInput }
+  | { name: "remove_section"; input: RemoveSectionInput }
+  | { name: "reorder_sections"; input: ReorderSectionsInput }
+  | { name: "reorder_questions"; input: ReorderQuestionsInput };
 
 export interface ApplyResult {
   schema: QuestionnaireSchema;
@@ -161,6 +173,21 @@ export function dispatchOperation(
     case "move_question": {
       const r = moveQuestion(schema, payload.input);
       return { schema: r.schema, details: { question: r.question } };
+    }
+    case "remove_section": {
+      const r = removeSection(schema, payload.input);
+      return { schema: r.schema, details: { removed: r.removed } };
+    }
+    case "reorder_sections": {
+      const r = reorderSections(schema, payload.input);
+      return { schema: r.schema, details: { order: r.order } };
+    }
+    case "reorder_questions": {
+      const r = reorderQuestions(schema, payload.input);
+      return {
+        schema: r.schema,
+        details: { sectionId: r.sectionId, order: r.order },
+      };
     }
     default: {
       // 穷尽性检查：新增操作名时这里会编译报错

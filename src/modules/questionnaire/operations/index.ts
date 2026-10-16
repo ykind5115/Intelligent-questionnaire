@@ -10,6 +10,23 @@ export { updateSection, type UpdateSectionResult } from "./update-section.js";
 export { updateQuestion, type UpdateQuestionResult } from "./update-question.js";
 export { removeQuestion, type RemoveQuestionResult } from "./remove-question.js";
 export { moveQuestion, type MoveQuestionResult } from "./move-question.js";
+export { removeSection, type RemoveSectionResult } from "./remove-section.js";
+export {
+  reorderSections,
+  type ReorderSectionsResult,
+} from "./reorder-sections.js";
+export {
+  reorderQuestions,
+  type ReorderQuestionsResult,
+} from "./reorder-questions.js";
+export {
+  planInstanceNoBackfill,
+  localDayKey,
+  parseInstanceNoSeq,
+  type BackfillAssignment,
+  type BackfillInput,
+  type BackfillPlan,
+} from "./backfill-instance-no.js";
 
 export { uuidIdFactory, makeSequenceIdFactory, type IdFactory } from "./id-factory.js";
 
@@ -20,4 +37,7 @@ export type {
   UpdateQuestionInput,
   RemoveQuestionInput,
   MoveQuestionInput,
+  RemoveSectionInput,
+  ReorderSectionsInput,
+  ReorderQuestionsInput,
 } from "./types.js";

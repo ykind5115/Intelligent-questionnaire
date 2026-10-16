@@ -68,3 +68,31 @@ export interface MoveQuestionInput {
   /** 目标位置（1 开始）。不传则追加到末尾。 */
   targetOrder?: number;
 }
+
+/**
+ * remove_section：删除分组（连同组内问题）。
+ *
+ * 人工编辑器（拖拽画布）需要它 —— 从零建模板时加错分组要能撤销掉，
+ * 而不是逐题删除后留下一个空分组。
+ */
+export interface RemoveSectionInput {
+  sectionId: string;
+}
+
+/**
+ * reorder_sections：按给定的 id 顺序整体重排分组。
+ *
+ * 只给顺序，order 由后端重算（03 文档第 21 节）。
+ * 一次拖拽会牵动被拖项跨过的所有项，用「整表重排」表达最不容易错。
+ */
+export interface ReorderSectionsInput {
+  /** 必须恰好是当前全部分组的一个排列 */
+  sectionIds: string[];
+}
+
+/** reorder_questions：把单个分组内的问题按给定顺序重排 */
+export interface ReorderQuestionsInput {
+  sectionId: string;
+  /** 必须恰好是该分组当前全部问题的一个排列 */
+  questionIds: string[];
+}

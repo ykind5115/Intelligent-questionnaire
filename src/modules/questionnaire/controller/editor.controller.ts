@@ -24,7 +24,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { sendSuccess } from "../../../app/api-response.js";
 import { asyncHandler } from "../../../app/error-handler.js";
-import { validate } from "../../../app/validate.js";
+import { validate, validatedQuery } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireService } from "../service/questionnaire.service.js";
 
@@ -143,6 +143,30 @@ const deleteQuestionBody = z.object({
   expectedRevision: expectedRevisionSchema,
 });
 
+/**
+ * 删除分组（连同组内问题）。
+ *
+ * `expectedRevision` 走 **query** 而不是 body：
+ * DELETE 带 body 在部分客户端/代理上会被丢掉（fetch 支持，但不是所有工具链都行），
+ * query 更稳妥也更显眼（出现在日志里）。实现里用 z.coerce 容忍字符串。
+ */
+const removeSectionQuery = z.object({
+  expectedRevision: z.coerce.number().int().positive().optional(),
+});
+
+/** 整表重排分组：只给 id 顺序，order 由后端算（03 文档第 21 节） */
+const reorderSectionsBody = z.object({
+  sectionIds: z.array(z.string().min(1)).min(1),
+  expectedRevision: expectedRevisionSchema,
+});
+
+/** 组内重排问题 */
+const reorderQuestionsBody = z.object({
+  sectionId: z.string().min(1),
+  questionIds: z.array(z.string().min(1)),
+  expectedRevision: expectedRevisionSchema,
+});
+
 type OperationPayload = Parameters<
   typeof questionnaireService.applyToInstance
 >[1];
@@ -252,6 +276,25 @@ function buildRemoveQuestion(questionId: string): OperationPayload {
   return { name: "remove_question", input: { questionId } };
 }
 
+function buildRemoveSection(sectionId: string): OperationPayload {
+  return { name: "remove_section", input: { sectionId } };
+}
+
+function buildReorderSections(
+  body: z.infer<typeof reorderSectionsBody>
+): OperationPayload {
+  return { name: "reorder_sections", input: { sectionIds: body.sectionIds } };
+}
+
+function buildReorderQuestions(
+  body: z.infer<typeof reorderQuestionsBody>
+): OperationPayload {
+  return {
+    name: "reorder_questions",
+    input: { sectionId: body.sectionId, questionIds: body.questionIds },
+  };
+}
+
 // ============================================================
 // 通用注册：把六个操作挂到一套目标的四个路径上
 // ============================================================
@@ -306,6 +349,17 @@ function registerOperations(
   );
 
   // ---- 修改分组 ----
+  // 注意顺序：`/sections/reorder` 必须注册在 `/sections/:sectionId` **之前**，
+  // 否则 "reorder" 会被当成一个 sectionId 匹配掉（Express 按注册顺序匹配）。
+  router.patch(
+    `${prefix}/sections/reorder`,
+    validate({ params: schemas.base, body: reorderSectionsBody }),
+    asyncHandler(async (req, res) => {
+      const body = req.body as z.infer<typeof reorderSectionsBody>;
+      await run(req, res, buildReorderSections(body), body.expectedRevision);
+    })
+  );
+
   router.patch(
     `${prefix}/sections/:sectionId`,
     validate({ params: schemas.section, body: updateSectionBody }),
@@ -318,6 +372,17 @@ function registerOperations(
         buildUpdateSection(sectionId, body),
         body.expectedRevision
       );
+    })
+  );
+
+  // ---- 删除分组（连同组内问题） ----
+  router.delete(
+    `${prefix}/sections/:sectionId`,
+    validate({ params: schemas.section, query: removeSectionQuery }),
+    asyncHandler(async (req, res) => {
+      const { sectionId } = req.params as { sectionId: string };
+      const query = validatedQuery<z.infer<typeof removeSectionQuery>>(req);
+      await run(req, res, buildRemoveSection(sectionId), query.expectedRevision);
     })
   );
 
@@ -346,6 +411,17 @@ function registerOperations(
         buildMoveQuestion(questionId, body),
         body.expectedRevision
       );
+    })
+  );
+
+  // ---- 组内重排问题 ----
+  // 同样必须在 `/questions/:questionId` 之前注册
+  router.patch(
+    `${prefix}/questions/reorder`,
+    validate({ params: schemas.base, body: reorderQuestionsBody }),
+    asyncHandler(async (req, res) => {
+      const body = req.body as z.infer<typeof reorderQuestionsBody>;
+      await run(req, res, buildReorderQuestions(body), body.expectedRevision);
     })
   );
 
