@@ -883,3 +883,77 @@ textarea:focus {
 .table tbody tr.row-selected:hover {
   background: var(--primary-weak);
 }
+
+/* ============================================================
+   模板分类管理（弹窗内）
+   ============================================================ */
+
+.cat-create {
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cat-create h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+/* 名称 + 编码并排；窄屏自动换行 */
+.cat-form-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.cat-form-row .field {
+  flex: 1;
+  min-width: 160px;
+}
+
+.cat-create .btn {
+  margin-top: 8px;
+}
+
+.cat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cat-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  flex-wrap: wrap;
+}
+
+.cat-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 220px;
+}
+
+/* 编辑态下 main 里会换成两个输入框，让它们各占一行 */
+.cat-main .field {
+  flex: 1;
+  min-width: 160px;
+}
+
+.cat-name {
+  font-weight: 600;
+}
+
+.cat-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}

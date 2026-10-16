@@ -32,6 +32,23 @@ export interface TemplateCategoryRow {
   name: string;
   description: string | null;
   createdAt: Date;
+  /** 引用该分类的模板数（列表与详情都带，便于界面提前禁用「删除」） */
+  templateCount: number;
+}
+
+/** 统计每个分类被多少模板引用（一次 groupBy，避免逐行 count 的 N+1） */
+async function countTemplatesByCategory(): Promise<Map<string, number>> {
+  const grouped = await prisma.questionnaireTemplate.groupBy({
+    by: ["categoryId"],
+    where: { categoryId: { not: null } },
+    _count: { _all: true },
+  });
+
+  const map = new Map<string, number>();
+  for (const g of grouped) {
+    if (g.categoryId) map.set(g.categoryId, g._count._all);
+  }
+  return map;
 }
 
 function assertTemplateAdmin(ctx: ServiceContext): void {
@@ -45,9 +62,17 @@ function assertTemplateAdmin(ctx: ServiceContext): void {
 export const templateCategoryService = {
   /** 列出全部分类。数量少（预期几十条），不做分页。 */
   async listCategories(): Promise<TemplateCategoryRow[]> {
-    return prisma.questionnaireTemplateCategory.findMany({
-      orderBy: [{ name: "asc" }],
-    });
+    const [rows, counts] = await Promise.all([
+      prisma.questionnaireTemplateCategory.findMany({
+        orderBy: [{ name: "asc" }],
+      }),
+      countTemplatesByCategory(),
+    ]);
+
+    return rows.map((r) => ({
+      ...r,
+      templateCount: counts.get(r.id) ?? 0,
+    }));
   },
 
   async getCategory(categoryId: string): Promise<TemplateCategoryRow> {
@@ -60,7 +85,10 @@ export const templateCategoryService = {
         `模板分类不存在：${categoryId}`
       );
     }
-    return found;
+    const usedBy = await prisma.questionnaireTemplate.count({
+      where: { categoryId },
+    });
+    return { ...found, templateCount: usedBy };
   },
 
   async createCategory(
@@ -101,7 +129,7 @@ export const templateCategoryService = {
       );
     }
 
-    return prisma.questionnaireTemplateCategory.create({
+    const created = await prisma.questionnaireTemplateCategory.create({
       data: {
         id: newId(),
         code,
@@ -111,6 +139,7 @@ export const templateCategoryService = {
           : {}),
       },
     });
+    return { ...created, templateCount: 0 };
   },
 
   /**
@@ -137,9 +166,9 @@ export const templateCategoryService = {
       throw validationError("分类名称不能为空", { path: "name" });
     }
 
-    await this.getCategory(categoryId);
+    const existing = await this.getCategory(categoryId);
 
-    return prisma.questionnaireTemplateCategory.update({
+    const updated = await prisma.questionnaireTemplateCategory.update({
       where: { id: categoryId },
       data: {
         ...(name !== undefined ? { name } : {}),
@@ -148,6 +177,7 @@ export const templateCategoryService = {
           : {}),
       },
     });
+    return { ...updated, templateCount: existing.templateCount };
   },
 
   /**

@@ -191,6 +191,30 @@ describe("模板分类", () => {
     expect(items.some((c) => c.id === created.id)).toBe(true);
   });
 
+  it("列表带 templateCount：未被引用为 0，被引用后递增", async () => {
+    const cat = await makeCategory();
+
+    // 建分类时就是 0
+    expect(cat).toBeTruthy();
+    const before = await apiRequest<{
+      items: { id: string; templateCount: number }[];
+    }>(client, "GET", CATEGORIES_PATH, { userId: USERS.admin });
+    const beforeHit = expectData<{
+      items: { id: string; templateCount: number }[];
+    }>(before).items.find((c) => c.id === cat.id);
+    expect(beforeHit?.templateCount).toBe(0);
+
+    // 挂一个模板上去 → 计数变 1
+    await makeTemplate({ categoryId: cat.id });
+    const after = await apiRequest<{
+      items: { id: string; templateCount: number }[];
+    }>(client, "GET", CATEGORIES_PATH, { userId: USERS.admin });
+    const afterHit = expectData<{
+      items: { id: string; templateCount: number }[];
+    }>(after).items.find((c) => c.id === cat.id);
+    expect(afterHit?.templateCount).toBe(1);
+  });
+
   it("分类编码重复 → 4xx，且错误信息指出是编码冲突", async () => {
     const code = `dup_${newId().slice(0, 6)}`;
     await makeCategory(code);

@@ -255,6 +255,10 @@ function renderDetail() {
   const reset = button("重置");
   reset.addEventListener("click", renderDetail);
   btnRow.appendChild(reset);
+
+  const manageCats = button("管理分类");
+  manageCats.addEventListener("click", openCategoryManager);
+  btnRow.appendChild(manageCats);
   form.appendChild(btnRow);
 
   if (!state.isAdmin) {
@@ -266,16 +270,14 @@ function renderDetail() {
     );
   }
 
-  // 分类本身的新增/改名/删除目前只有 API，没有界面。
-  // 与其让用户对着空下拉框猜，不如直说。
+  // 分类现在可以在弹窗里管理；这里只说明入口与「引用中不能删」这条规则
   form.appendChild(
     el("p", {
       className: "hint",
       text:
         state.categories.length === 0
-          ? "还没有任何分类。分类的新增/改名/删除目前需走接口 " +
-            "（POST /api/v1/questionnaire-template-categories），界面待后续版本补上。"
-          : "分类的新增/改名/删除目前需走接口，界面上只能给模板选择已有分类。",
+          ? "还没有任何分类。点「管理分类」新建（需要模板管理员账号）。"
+          : "点「管理分类」可新建/改名/删除分类；仍被模板引用的分类不能删除。",
     })
   );
   box.appendChild(form);
@@ -401,6 +403,232 @@ async function showVersionSchema(versionId) {
   } catch (e) {
     toast(`载入版本失败：${e.message}`, true);
   }
+}
+
+// ============================================================
+// 分类管理（弹窗内的增 / 改 / 删）
+// ============================================================
+
+const CATEGORIES_PATH = "/api/v1/questionnaire-template-categories";
+
+/**
+ * 打开「管理分类」弹窗。
+ *
+ * 为什么做成弹窗而不是独立页面：分类是模板的附属组织维度，
+ * 用户是在「给模板选分类」时才发现缺分类，就地能建最顺手。
+ *
+ * 平台限制：这里的输入框都是受控的简单表单，不依赖任何 UI 库
+ * （前端无构建链，见 AGENT.md 第 7 节）。
+ */
+function openCategoryManager() {
+  const backdrop = el("div", { className: "modal-backdrop" });
+  const modal = el("div", { className: "modal" });
+
+  // ---- 头部 ----
+  const head = el("div", { className: "modal-head" });
+  head.appendChild(el("h3", { text: "管理模板分类" }));
+  const close = button("关闭", { className: "btn btn-sm" });
+  close.addEventListener("click", async () => {
+    backdrop.remove();
+    // 关闭时刷新：分类可能被改过，模板列表与下拉都要跟着更新
+    await loadCategories();
+    await loadList();
+    renderDetail();
+  });
+  head.appendChild(close);
+  modal.appendChild(head);
+
+  const body = el("div", { className: "modal-body" });
+
+  // ---- 新建表单 ----
+  const createBox = el("div", { className: "cat-create" });
+  createBox.appendChild(el("h4", { text: "新增分类" }));
+
+  const formRow = el("div", { className: "cat-form-row" });
+
+  const nameInput = el("input", {
+    attrs: { placeholder: "分类名称，如 无人机核查", maxlength: "100" },
+  });
+  const codeInput = el("input", {
+    attrs: { placeholder: "编码，如 drone_check", maxlength: "64" },
+  });
+  formRow.appendChild(labelled("名称", nameInput));
+  formRow.appendChild(labelled("编码", codeInput));
+  createBox.appendChild(formRow);
+
+  const descInput = el("input", {
+    attrs: { placeholder: "描述（可留空）", maxlength: "2000" },
+  });
+  createBox.appendChild(labelled("描述", descInput));
+
+  createBox.appendChild(
+    el("p", {
+      className: "hint",
+      text:
+        "编码是程序引用的稳定标识：只能用小写字母、数字、下划线，以字母开头，" +
+        "创建后不可修改。",
+    })
+  );
+
+  const createBtn = button("新增", { className: "btn btn-primary" });
+  createBtn.addEventListener("click", async () => {
+    const name = nameInput.value.trim();
+    const code = codeInput.value.trim();
+    if (!name || !code) {
+      toast("名称与编码都要填", true);
+      return;
+    }
+    try {
+      await api("POST", CATEGORIES_PATH, {
+        name,
+        code,
+        ...(descInput.value.trim() ? { description: descInput.value.trim() } : {}),
+      });
+      toast(`已新增分类「${name}」`);
+      await refresh();
+    } catch (e) {
+      toast(
+        e.code === "PERMISSION_DENIED"
+          ? "新增分类需要「模板管理员」账号，请在右上角切换用户。"
+          : `新增失败：${e.message}`,
+        true
+      );
+    }
+  });
+  createBox.appendChild(createBtn);
+  body.appendChild(createBox);
+
+  // ---- 列表 ----
+  const listBox = el("div", { className: "cat-list" });
+  body.appendChild(listBox);
+
+  /** 重画弹窗内的列表（并同步外层下拉） */
+  async function refresh() {
+    await loadCategories();
+    listBox.textContent = "";
+
+    if (state.categories.length === 0) {
+      listBox.appendChild(
+        el("p", { className: "hint", text: "还没有任何分类。" })
+      );
+    }
+
+    for (const c of state.categories) {
+      listBox.appendChild(renderCategoryRow(c, refresh));
+    }
+
+    nameInput.value = "";
+    codeInput.value = "";
+    descInput.value = "";
+    nameInput.focus();
+  }
+
+  modal.appendChild(body);
+  backdrop.appendChild(modal);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close.click();
+  });
+  document.body.appendChild(backdrop);
+
+  refresh();
+}
+
+/** 「标签 + 输入框」的小组合 */
+function labelled(labelText, input) {
+  const wrap = el("label", { className: "field" });
+  wrap.appendChild(el("span", { text: labelText }));
+  wrap.appendChild(input);
+  return wrap;
+}
+
+/** 分类列表的一行：展示态与编辑态共用一个 DOM 槽 */
+function renderCategoryRow(c, refresh) {
+  const row = el("div", { className: "cat-row" });
+
+  const main = el("div", { className: "cat-main" });
+  main.appendChild(el("span", { className: "cat-name", text: c.name }));
+  main.appendChild(el("span", { className: "tag", text: c.code }));
+
+  const used = c.templateCount ?? 0;
+  main.appendChild(
+    el("span", {
+      className: used > 0 ? "tag ok" : "hint",
+      text: used > 0 ? `${used} 个模板在用` : "未被使用",
+    })
+  );
+  if (c.description) {
+    main.appendChild(el("span", { className: "hint", text: c.description }));
+  }
+  row.appendChild(main);
+
+  const actions = el("div", { className: "cat-actions" });
+
+  const edit = button("改名", { className: "btn-ghost" });
+  edit.addEventListener("click", () => {
+    actions.textContent = "";
+    const nameInput = el("input", { attrs: { value: c.name, maxlength: "100" } });
+    nameInput.value = c.name;
+    const descInput = el("input", {
+      attrs: { value: c.description ?? "", maxlength: "2000" },
+    });
+    descInput.value = c.description ?? "";
+    main.textContent = "";
+    main.appendChild(labelled("名称", nameInput));
+    main.appendChild(labelled("描述", descInput));
+
+    const save = button("保存", { className: "btn-primary btn-sm" });
+    save.addEventListener("click", async () => {
+      const name = nameInput.value.trim();
+      if (!name) {
+        toast("分类名称不能为空", true);
+        return;
+      }
+      try {
+        await api("PATCH", `${CATEGORIES_PATH}/${c.id}`, {
+          name,
+          description: descInput.value.trim() === "" ? null : descInput.value.trim(),
+        });
+        toast("已保存");
+        await refresh();
+      } catch (e) {
+        toast(`保存失败：${e.message}`, true);
+      }
+    });
+    actions.appendChild(save);
+
+    const cancel = button("取消", { className: "btn-sm" });
+    cancel.addEventListener("click", () => refresh());
+    actions.appendChild(cancel);
+  });
+  actions.appendChild(edit);
+
+  const del = button("删除", { className: "btn-ghost danger" });
+  if (used > 0) {
+    // 后端也会拦（外键 RESTRICT），这里提前禁用并说明原因，
+    // 避免用户点一次才知道删不掉
+    del.disabled = true;
+    del.title = `还有 ${used} 个模板在用这个分类，先把它们改到别的分类`;
+  } else {
+    del.addEventListener("click", async () => {
+      if (!window.confirm(`确定删除分类「${c.name}」？`)) return;
+      try {
+        await api("DELETE", `${CATEGORIES_PATH}/${c.id}`);
+        toast(`已删除分类「${c.name}」`);
+        await refresh();
+      } catch (e) {
+        toast(
+          e.code === "PERMISSION_DENIED"
+            ? "删除分类需要「模板管理员」账号。"
+            : `删除失败：${e.message}`,
+          true
+        );
+      }
+    });
+  }
+  actions.appendChild(del);
+
+  row.appendChild(actions);
+  return row;
 }
 
 // ============================================================
