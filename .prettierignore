@@ -1,0 +1,25 @@
+# Prettier 忽略清单。
+#
+# 与 eslint.config.js 的 ignores 保持同一口径：
+# 生成产物、依赖、构建输出、覆盖率、前端静态资源、临时脚本都不格式化。
+
+node_modules/
+dist/
+coverage/
+generated/
+
+# Prisma 迁移 SQL：由 Prisma 生成，格式不该由我们改写
+prisma/migrations/
+
+# 前端静态资源：原生 ES 模块 + CSS，目前没有纳入格式化范围。
+# 若将来要格式化前端，删掉这两行即可（但请先确认不会产生大范围无关 diff）。
+public/
+
+# 临时脚本与审计目录（已被 .gitignore 覆盖）
+tmp-*/
+tmp-*
+
+# 其他
+*.min.js
+*.min.css
+pnpm-lock.yaml

@@ -329,7 +329,7 @@ beforeAll(async () => {
     appSource = "手工装配（express + json/requestId/devAuth + 本模块 router + errorHandler）";
     client = await startTestServer(buildFallbackApp());
   }
-  // eslint-disable-next-line no-console
+   
   console.log(`[dispatch-response-review] 测试用 app 来源：${appSource}`);
 }, 60_000);
 

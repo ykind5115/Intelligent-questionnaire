@@ -39,11 +39,11 @@ const adapter = new PrismaPg(
   {
     // 连接层异常打日志，便于定位池耗尽问题（而不是静默失败）
     onPoolError: (err: Error) => {
-      // eslint-disable-next-line no-console
+       
       console.error("[db pool error]", err.message);
     },
     onConnectionError: (err: Error) => {
-      // eslint-disable-next-line no-console
+       
       console.error("[db connection error]", err.message);
     },
   }

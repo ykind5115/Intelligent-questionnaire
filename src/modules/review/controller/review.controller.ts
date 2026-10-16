@@ -47,7 +47,7 @@ export const reviewController = {
   /** GET /questionnaire-responses/review/pending */
   listPending: asyncHandler(async (req: Request, res: Response) => {
     const query = validatedQuery<z.infer<typeof pendingReviewsQuery>>(req);
-    const pagination = parsePagination(req.query as Record<string, unknown>);
+    const pagination = parsePagination(req.query);
 
     const { items, total } = await reviewService.listPending(
       {

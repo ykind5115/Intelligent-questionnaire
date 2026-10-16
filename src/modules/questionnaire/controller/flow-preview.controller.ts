@@ -15,7 +15,6 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import { sendSuccess } from "../../../app/api-response.js";
 import { asyncHandler } from "../../../app/error-handler.js";
-import { validate } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { resolveFlow, findUnreachable } from "../operations/index.js";
 import { questionnaireService } from "../service/questionnaire.service.js";
@@ -85,7 +84,7 @@ export const flowPreviewController = {
 
     const results = body.cases.map((c) => {
       try {
-        const flow = resolveFlow(schema as never, c.answers);
+        const flow = resolveFlow(schema, c.answers);
         return {
           ...(c.label !== undefined ? { label: c.label } : {}),
           questionIds: flow.steps.map((s) => s.questionId),

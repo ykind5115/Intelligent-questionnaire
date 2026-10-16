@@ -109,7 +109,7 @@ export const dispatchController = {
   /** GET /dispatch-tasks */
   list: asyncHandler(async (req: Request, res: Response) => {
     const query = validatedQuery<z.infer<typeof listDispatchTasksQuery>>(req);
-    const pagination = parsePagination(req.query as Record<string, unknown>);
+    const pagination = parsePagination(req.query);
 
     const { items, total } = await dispatchService.listTasks(
       {

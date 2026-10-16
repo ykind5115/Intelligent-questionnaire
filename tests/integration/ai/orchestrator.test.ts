@@ -60,7 +60,7 @@ class ScriptedProvider implements LLMProvider {
     return this.next();
   }
 
-  // eslint-disable-next-line require-yield
+   
   async *chatStream(): AsyncIterable<never> {
     throw new Error("本测试不使用流式");
   }

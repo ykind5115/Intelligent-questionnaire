@@ -12,7 +12,6 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { prisma } from "../../../src/database/client.js";
 import {
   ErrorCode,
-  isOperationError,
 } from "../../../src/shared/errors/index.js";
 import {
   ALL_TOOLS,
@@ -24,7 +23,6 @@ import {
 import { newId } from "../../../src/shared/utils/id.js";
 import { templateService } from "../../../src/modules/questionnaire/service/template.service.js";
 import {
-  CTX,
   USERS,
   assignInvestigator,
   countArtifacts,

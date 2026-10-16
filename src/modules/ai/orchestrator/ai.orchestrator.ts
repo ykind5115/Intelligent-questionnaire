@@ -19,11 +19,9 @@ import { newId } from "../../../shared/utils/id.js";
 import { runTool, allLlmToolSpecs, type ToolContext } from "../tools/index.js";
 import type { ToolResult } from "../tools/types.js";
 import {
-  LLMError,
   type ChatMessage,
   type ChatResult,
   type LLMProvider,
-  type ToolCallRequest,
 } from "../providers/llm-provider.js";
 import { buildSystemPrompt } from "../prompts/prompt-builder.js";
 import { questionnaireService } from "../../questionnaire/service/questionnaire.service.js";

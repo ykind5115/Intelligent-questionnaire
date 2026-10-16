@@ -23,7 +23,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"prisma/**/*.ts\""
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"prisma/**/*.ts\" \"*.{json,js,md}\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"prisma/**/*.ts\" \"*.{json,js,md}\""
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.0",
@@ -38,9 +40,12 @@
     "@types/node": "^22.18.8",
     "@types/uuid": "^10.0.0",
     "dotenv": "^17.2.3",
+    "eslint": "^10.12.0",
+    "prettier": "^3.9.10",
     "prisma": "7.10.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2",
     "vitest": "^3.2.4"
   }
 }

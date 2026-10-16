@@ -37,7 +37,7 @@ export function errorHandler(
   }
 
   const message = err instanceof Error ? err.message : String(err);
-  // eslint-disable-next-line no-console
+   
   console.error("[unhandled error]", err);
 
   sendFailure(req, res, "SYSTEM_ERROR", message, 500);

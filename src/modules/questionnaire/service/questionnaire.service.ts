@@ -21,8 +21,6 @@ import {
   OperationError,
   permissionDenied,
   questionnaireLocked,
-  sectionNotFound,
-  questionNotFound,
   revisionConflict,
   validationError,
 } from "../../../shared/errors/index.js";

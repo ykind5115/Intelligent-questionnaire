@@ -20,7 +20,6 @@ import { afterAll, describe, expect, it } from "vitest";
 import { prisma } from "../../../src/database/client.js";
 import { formatEvalReport, runEval } from "./harness.js";
 import type { LLMProvider, ChatResult } from "../../../src/modules/ai/providers/index.js";
-import type { EvalCase } from "../../fixtures/ai-cases/types.js";
 import { EVAL_CASES } from "../../fixtures/ai-cases/eval-cases.js";
 
 // ============================================================
@@ -45,7 +44,7 @@ class ScriptedProvider implements LLMProvider {
     return this.next();
   }
 
-  // eslint-disable-next-line require-yield
+   
   async *chatStream(): AsyncIterable<never> {
     throw new Error("评测不使用流式");
   }
@@ -144,7 +143,7 @@ describe("评测执行器", () => {
 
     // 只跑一条用例，且它应当通过（分组与题目关键词都命中）
     expect(report.total).toBe(1);
-    // eslint-disable-next-line no-console
+     
     console.log("\n" + formatEvalReport(report) + "\n");
 
     expect(report.schemaValidRate).toBe(1);
@@ -189,7 +188,7 @@ describe("评测执行器", () => {
       },
     });
 
-    // eslint-disable-next-line no-console
+     
     console.log("\n" + formatEvalReport(report) + "\n");
 
     const r = report.results[0]!;

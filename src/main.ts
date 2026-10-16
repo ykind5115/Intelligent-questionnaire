@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   const app = createApp();
 
   const server = app.listen(env.PORT, () => {
-    // eslint-disable-next-line no-console
+     
     console.log(
       [
         "",
@@ -35,7 +35,7 @@ async function main(): Promise<void> {
   });
 
   const shutdown = async (signal: string): Promise<void> => {
-    // eslint-disable-next-line no-console
+     
     console.log(`\n收到 ${signal}，正在关闭...`);
     server.close();
     await prisma.$disconnect();

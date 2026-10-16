@@ -13,7 +13,6 @@ import type { AddressInfo } from "node:net";
 
 import { createApp } from "../../../src/app/app.js";
 import { prisma } from "../../../src/database/client.js";
-import { newId } from "../../../src/shared/utils/id.js";
 import type {
   ChatMessage,
   ChatOptions,

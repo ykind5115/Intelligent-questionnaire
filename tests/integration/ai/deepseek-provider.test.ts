@@ -10,7 +10,7 @@
  * 这里用本机 mock HTTP 服务充当模型端点，
  * 因此**不需要真实 API Key，也不访问外网**。
  */
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DeepSeekProvider } from "../../../src/modules/ai/providers/index.js";

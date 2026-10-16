@@ -222,7 +222,7 @@ export function createInstanceRouter(): Router {
     validate({ query: listInstancesQuery }),
     asyncHandler(async (req: Request, res: Response) => {
       const query = validatedQuery<z.infer<typeof listInstancesQuery>>(req);
-      const pagination = parsePagination(req.query as Record<string, unknown>);
+      const pagination = parsePagination(req.query);
 
       const { items, total, users } = await questionnaireService.listInstances(
         {

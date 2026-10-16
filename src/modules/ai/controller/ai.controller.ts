@@ -228,7 +228,7 @@ export function createAiRouter(): Router {
     "/conversations",
     validate({ query: paginationQuery }),
     asyncHandler(async (req: Request, res: Response) => {
-      const pagination = parsePagination(req.query as Record<string, unknown>);
+      const pagination = parsePagination(req.query);
       const { items, total } = await aiConversationService.listConversations(
         aiContextOf(req),
         { skip: pagination.offset, take: pagination.pageSize }
@@ -263,7 +263,7 @@ export function createAiRouter(): Router {
     validate({ params: conversationParams, query: paginationQuery }),
     asyncHandler(async (req: Request, res: Response) => {
       const { id } = req.params as z.infer<typeof conversationParams>;
-      const pagination = parsePagination(req.query as Record<string, unknown>);
+      const pagination = parsePagination(req.query);
 
       const { items, total } = await aiConversationService.listMessages(
         id,

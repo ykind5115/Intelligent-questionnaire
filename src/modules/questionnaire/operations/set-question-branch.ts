@@ -71,7 +71,7 @@ export function setQuestionBranch(
 
   // ---- 写入 ----
   if (input.branches && input.branches.length > 0) {
-    question.branches = input.branches as never;
+    question.branches = input.branches;
   } else {
     // 空数组 = 清除。用 delete 而不是留一个空数组，
     // 否则序列化出来的结构里到处是 "branches": []，既占体积又干扰人工阅读。
@@ -94,7 +94,7 @@ export function setQuestionBranch(
   // 它不是 OperationError，会被兜底成 500 —— 而「跳转指向不存在的题目」
   // 明明是调用方参数错误，应该是 400。
   // 先把图问题翻成 invalidParameter，错误码与错误信息都正确。
-  const issues = checkFlow(next as never);
+  const issues = checkFlow(next);
   if (issues.length > 0) {
     throw invalidParameter(issues[0]!.message, {
       path: issues[0]!.path.join("."),

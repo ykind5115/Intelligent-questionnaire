@@ -165,7 +165,7 @@ export function createTemplateRouter(): Router {
     validate({ query: listQuery }),
     asyncHandler(async (req: Request, res: Response) => {
       const query = validatedQuery<z.infer<typeof listQuery>>(req);
-      const pagination = parsePagination(req.query as Record<string, unknown>);
+      const pagination = parsePagination(req.query);
 
       const { items, total } = await templateService.listTemplates(
         {
@@ -198,7 +198,7 @@ export function createTemplateRouter(): Router {
     validate({ query: publishedVersionsQuery }),
     asyncHandler(async (req: Request, res: Response) => {
       const query = validatedQuery<z.infer<typeof publishedVersionsQuery>>(req);
-      const pagination = parsePagination(req.query as Record<string, unknown>);
+      const pagination = parsePagination(req.query);
 
       const { items, total } = await templateService.listCurrentPublishedVersions(
         { ...(query.keyword !== undefined ? { keyword: query.keyword } : {}) },
