@@ -77,12 +77,24 @@ pnpm db:studio      # 图形化看数据
 pnpm db:reset       # 清空重建（会丢数据）
 ```
 
-**`package.json` 里的 `lint` / `format` 目前是坏的** —— 脚本引用了
-`eslint` / `prettier`，但这两个包不在 `devDependencies` 里，执行会报
-`'eslint' is not recognized`。要么先 `pnpm add -D` 装上并补配置文件，
-要么别执行这两个脚本。**不要假装它们能跑。**
+`lint` / `format` **已可用**（2026-10-15 补齐）：
 
-质量门禁只有两条：`pnpm typecheck` 和 `pnpm test`。
+- `pnpm lint` / `pnpm lint:fix` —— ESLint 10 扁平配置，见 `eslint.config.js`
+- `pnpm format` / `pnpm format:check` —— Prettier 3，见 `.prettierrc.json`
+
+几条**不要踩**的注意点（都写进了配置文件注释）：
+
+- 只开了「能抓真问题」的规则，**没有任何格式规则**，所以不需要 `eslint-config-prettier`；
+- **类型感知的规则只作用在 tsconfig 覆盖的文件上**。铺给全部文件会让
+  `eslint.config.js` 自身也被要求提供类型信息，ESLint 直接报错退出；
+- `no-unnecessary-type-assertion` **刻意关闭** —— 它的 `--fix` 会删掉 Prisma JSONB 字段
+  必需的 `as object` 断言，实测把 typecheck 打回错误。详见第 9 节经验 ⑦。
+
+质量门禁：`pnpm typecheck`、`pnpm test`、`pnpm lint`。
+
+**`format:check` 目前不是门禁**：存量代码从未经过 Prettier，
+全量 `--write` 会产生约 3500 行的纯格式 diff。
+在没有决定「是否一次性格式化」之前，**只对新增/改动的文件跑 Prettier**。
 
 ---
 
@@ -459,6 +471,24 @@ public/app.css         四页共用样式
 **怎么办**：写「约束」时逐条问「**这真的是不能，还是只是现在不是？**」
 前者才是约束。
 
+#### ⑦ 自动修复工具的输出必须先验证，再接受
+
+**案例**：接入 ESLint 后先跑 `pnpm lint:fix` 清理过时注释，
+结果 **lint 从 0 error 变成 1 error、typecheck 从通过变成 2 个错误** ——
+它「顺手」删掉了 Prisma 需要的一处类型断言（`schema as object`），
+而那处断言在 ESLint 看来是多余的。
+
+另一个例子：给分支写的验证函数里 `String(value)` 被判为
+`no-base-to-string` —— 这次规则是对的，它抓出了一个真缺陷
+（对齐对象时永远得到 `"[object Object]"`，静默比较失败）。
+
+**怎么办**：
+
+- 跑完 `--fix` / `--write` **必须重新跑 typecheck 与测试**，
+  并且**看 diff 里到底删了什么**，不要只看「问题数降到 0」；
+- 规则若与代码的**刻意约定**冲突（例如 `expectData<T>()` 有意放宽签名、
+  让调用方显式写出类型），就**关掉规则并写明原因**，而不是被规则扭曲写法；
+- 自动修复工具的建议是**输入**，不是裁决。
 ### 9.5 动手前的自检
 
 写代码前扫一眼 9.4；**如果这次又踩了新的坑，交付前把它加进来**。
