@@ -31,6 +31,10 @@ renderNav("templates");
 const state = {
   keyword: "",
   status: "",
+  /** 分类筛选（空串 = 全部） */
+  categoryId: "",
+  /** 全部分类，供筛选下拉与编辑时的选择框共用 */
+  categories: [],
   page: 1,
   pageSize: 10,
   total: 0,
@@ -40,6 +44,39 @@ const state = {
   /** 当前用户是否模板管理员（决定写操作是否可用） */
   isAdmin: false,
 };
+
+/** 分类名查找（列表要显示名字而不是 uuid） */
+function categoryName(categoryId) {
+  if (!categoryId) return "—";
+  const hit = state.categories.find((c) => c.id === categoryId);
+  return hit ? hit.name : "—";
+}
+
+/**
+ * 载入分类列表并填充筛选下拉。
+ *
+ * 失败不影响主列表：分类只是组织维度，
+ * 接口挂了也应该能继续看模板（下拉保持「全部」）。
+ */
+async function loadCategories() {
+  try {
+    const data = await api("GET", "/api/v1/questionnaire-template-categories");
+    state.categories = data.items ?? [];
+  } catch {
+    state.categories = [];
+  }
+
+  const sel = $("category-filter");
+  if (!sel) return;
+  const current = sel.value;
+  sel.textContent = "";
+  sel.appendChild(el("option", { attrs: { value: "" }, text: "全部" }));
+  for (const c of state.categories) {
+    const opt = el("option", { attrs: { value: c.id }, text: c.name });
+    sel.appendChild(opt);
+  }
+  sel.value = current;
+}
 
 // ============================================================
 // 列表
@@ -52,6 +89,7 @@ async function loadList() {
   });
   if (state.keyword) params.set("keyword", state.keyword);
   if (state.status) params.set("status", state.status);
+  if (state.categoryId) params.set("categoryId", state.categoryId);
 
   const tbody = $("template-rows");
   tbody.textContent = "";
@@ -73,7 +111,7 @@ async function loadList() {
           text: state.keyword
             ? `没有匹配「${state.keyword}」的模板`
             : "还没有模板。可以到「从零创建」用 AI 做一份。",
-          attrs: { colspan: "6" },
+          attrs: { colspan: "7" },
         })
       );
       tbody.appendChild(tr);
@@ -91,7 +129,7 @@ async function loadList() {
       el("td", {
         className: "empty",
         text: `载入失败：${e.message}`,
-        attrs: { colspan: "6" },
+        attrs: { colspan: "7" },
       })
     );
     tbody.appendChild(tr);
@@ -101,6 +139,9 @@ async function loadList() {
 function renderRow(t) {
   const tr = el("tr");
   tr.appendChild(el("td", { text: t.name }));
+
+  // 分类：存量模板没有分类，显示「—」
+  tr.appendChild(el("td", { className: "hint", text: categoryName(t.categoryId) }));
 
   const statusTd = el("td");
   statusTd.appendChild(
@@ -189,6 +230,23 @@ function renderDetail() {
   descField.appendChild(descInput);
   form.appendChild(descField);
 
+  // 分类：可留空。选项来自 /questionnaire-template-categories；
+  // 存量模板的 categoryId 为 null，对应「（未分类）」。
+  const catField = el("label", { className: "field" });
+  catField.appendChild(el("span", { text: "分类" }));
+  const catSelect = el("select", { attrs: { id: "edit-category" } });
+  catSelect.appendChild(
+    el("option", { attrs: { value: "" }, text: "（未分类）" })
+  );
+  for (const c of state.categories) {
+    catSelect.appendChild(
+      el("option", { attrs: { value: c.id }, text: `${c.name}（${c.code}）` })
+    );
+  }
+  catSelect.value = t.categoryId ?? "";
+  catField.appendChild(catSelect);
+  form.appendChild(catField);
+
   const btnRow = el("div", { className: "form-actions" });
   const save = button("保存", { className: "btn btn-primary" });
   save.addEventListener("click", saveTemplate);
@@ -207,12 +265,26 @@ function renderDetail() {
       })
     );
   }
+
+  // 分类本身的新增/改名/删除目前只有 API，没有界面。
+  // 与其让用户对着空下拉框猜，不如直说。
+  form.appendChild(
+    el("p", {
+      className: "hint",
+      text:
+        state.categories.length === 0
+          ? "还没有任何分类。分类的新增/改名/删除目前需走接口 " +
+            "（POST /api/v1/questionnaire-template-categories），界面待后续版本补上。"
+          : "分类的新增/改名/删除目前需走接口，界面上只能给模板选择已有分类。",
+    })
+  );
   box.appendChild(form);
 
   // ---- 元信息 ----
   const meta = el("div", { className: "meta-grid" });
   const rows = [
     ["模板 ID", t.id],
+    ["分类", categoryName(t.categoryId)],
     ["版本数", String(state.versions.length)],
     ["当前版本", t.currentVersionId ? t.currentVersionId.slice(0, 8) : "（未发布）"],
     ["创建时间", fmtTime(t.createdAt)],
@@ -350,11 +422,15 @@ async function saveTemplate() {
   // 描述原本有内容、现在清空了 → 传 null 表示「清空」
   const description = descRaw === "" ? null : descRaw;
 
+  // 分类同理：选「（未分类）」→ 传 null 清空
+  const catRaw = $("edit-category").value;
+  const categoryId = catRaw === "" ? null : catRaw;
+
   try {
     const updated = await api(
       "PATCH",
       `/api/v1/questionnaire-templates/${t.id}`,
-      { name, description }
+      { name, description, categoryId }
     );
     state.selected = updated;
     toast("已保存");
@@ -479,6 +555,12 @@ async function init() {
     loadList();
   });
 
+  $("category-filter").addEventListener("change", () => {
+    state.categoryId = $("category-filter").value;
+    state.page = 1;
+    loadList();
+  });
+
   $("btn-prev").addEventListener("click", () => {
     if (state.page > 1) {
       state.page -= 1;
@@ -491,6 +573,7 @@ async function init() {
     loadList();
   });
 
+  await loadCategories();
   await loadList();
 }
 

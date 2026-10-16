@@ -23,6 +23,13 @@
         </label>
 
         <label class="field">
+          <span>分类</span>
+          <select id="category-filter">
+            <option value="">全部</option>
+          </select>
+        </label>
+
+        <label class="field">
           <span>状态</span>
           <select id="status-filter">
             <option value="">全部</option>
@@ -51,6 +58,7 @@
             <thead>
               <tr>
                 <th>名称</th>
+                <th>分类</th>
                 <th>状态</th>
                 <th>版本</th>
                 <th>当前版本</th>
@@ -60,7 +68,7 @@
             </thead>
             <tbody id="template-rows">
               <tr>
-                <td colspan="6" class="empty">载入中…</td>
+                <td colspan="7" class="empty">载入中…</td>
               </tr>
             </tbody>
           </table>

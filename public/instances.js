@@ -106,7 +106,7 @@ async function loadList() {
           text: hasFilter()
             ? "没有符合条件的案件"
             : "还没有案件。可以到「下发问卷」用模板创建一个。",
-          attrs: { colspan: "7" },
+          attrs: { colspan: "8" },
         })
       );
       tbody.appendChild(tr);
@@ -127,7 +127,7 @@ async function loadList() {
           e.code === "PERMISSION_DENIED"
             ? "当前账号没有查看案件的权限。试试切换到「下发人员」或「模板管理员」。"
             : `载入失败：${e.message}`,
-        attrs: { colspan: "7" },
+        attrs: { colspan: "8" },
       })
     );
     tbody.appendChild(tr);
@@ -144,6 +144,14 @@ function renderRow(it) {
   });
 
   tr.appendChild(el("td", { text: it.title }));
+
+  // 可读编号：编号上线前创建的存量案件没有它，显示「—」
+  tr.appendChild(
+    el("td", {
+      className: "mono hint",
+      text: it.instanceNo ?? "—",
+    })
+  );
 
   const statusTd = el("td");
   statusTd.appendChild(
@@ -238,6 +246,7 @@ function renderDetail(detail, revisions) {
   const { sections, questions } = countSchema(detail.currentSchema);
   const meta = el("div", { className: "meta-grid" });
   const rows = [
+    ["案件编号", detail.instanceNo ?? "—（编号功能上线前创建）"],
     ["案件 ID", detail.id],
     ["状态", INSTANCE_STATUS_LABEL[detail.status] ?? detail.status],
     ["结构规模", `${sections} 个分组 / ${questions} 道题`],

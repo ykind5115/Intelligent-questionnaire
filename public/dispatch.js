@@ -120,10 +120,22 @@ function pick(t) {
   badge.textContent = `${t.templateName} v${t.versionNo}`;
   badge.className = "badge ok";
 
-  // 预填案件标题，减少输入
+  // 预填案件标题，减少输入。
+  //
+  // 用**模板名**预填，而不是原来那种「模板名 - 2026/10/15」：
+  //   带日期的默认值看起来像填好了，用户会直接提交，
+  //   结果库里堆满「新案件 - 2026/10/13 10:25:13」这种谁也认不出的标题
+  //   （实测 13 个案件里大半如此）。
+  //   模板名本身是有意义的，用户在此基础上补上调查对象即可。
   const titleInput = $("title-input");
   if (!titleInput.value.trim()) {
-    titleInput.value = `${t.templateName} - ${new Date().toLocaleDateString("zh-CN")}`;
+    titleInput.value = t.templateName;
+    titleInput.focus();
+    // 光标放到末尾，方便直接续写「 - 张三」
+    titleInput.setSelectionRange(
+      titleInput.value.length,
+      titleInput.value.length
+    );
   }
 
   $("btn-create").disabled = false;
@@ -197,7 +209,11 @@ async function createInstance() {
       title,
     });
     const { sections, questions } = countSchema(inst.currentSchema);
-    toast(`已创建案件「${inst.title}」（${sections} 个分组 / ${questions} 道题）`);
+    // 带上可读编号：同一个模板会建出多份案件，编号是区分它们的依据
+    const no = inst.instanceNo ? `（${inst.instanceNo}）` : "";
+    toast(
+      `已创建案件「${inst.title}」${no}（${sections} 个分组 / ${questions} 道题）`
+    );
 
     renderCreated(inst, sections, questions);
     $("title-input").value = "";
