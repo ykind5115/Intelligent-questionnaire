@@ -2201,6 +2201,12 @@ move_question
 一共：
 
 > **7 个核心 Tool。**
+>
+> **（2026-10-15 补记）实际操作已增至 8 个**：决策 D16 之后新增
+> `set_question_branch`（条件跳题），即下文第 49 节里被推迟的 `conditional_logic   ← 已于 2026-10-15 转正为 set_question_branch（决策 D16，见上）`。
+> 工具清单的权威来源是 `src/modules/ai/tools/tool-registry.ts` 的 `ALL_TOOLS`，
+> 并有测试逐个断言工具名（`tests/integration/ai/tools.test.ts`）——
+> 增减工具时两处必须同步。详见 docs/11 第 4.0 节。
 
 这已经能够完成：
 
