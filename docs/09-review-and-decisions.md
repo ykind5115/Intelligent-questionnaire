@@ -739,6 +739,7 @@ seed.ts 写入 4 个固定用户（各带一个角色）：
 | `08-ai_agent_prompt_tool_calling.md` | 原为 `07-ai_agent_prompt_tool_calling.md`，与本文档编号冲突，已改为 08 |
 | `09-review-and-decisions.md` | 本文档，评审结论与决策记录 |
 | `11-future-capability-plan.md` | 远期能力整合计划：条件分支（L1）、模板分类/任务台账/编号/轨迹（L2）、行式 DAG 表（L3 触发式）。依据决策 **D16** |
+| `12-node-graph-editor-research.md` | 节点图编辑器调研：库选型对比、三条路线取舍、设计时校验清单。结论：先有分支再有画布；只读预览可独立做 |
 | `文档一.md` / `问卷系统数据库设计文档.md` / `问卷系统数据库模型图.html` | 需求输入（非本仓库编号体系）。其能力已整合进上文 11，**结论见 D16**：不换表、分支用 `branch` 字段实现 |
 
 ## 11.3 本次修订解决的跨文档冲突
