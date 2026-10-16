@@ -90,11 +90,28 @@ pnpm db:reset       # 清空重建（会丢数据）
 - `no-unnecessary-type-assertion` **刻意关闭** —— 它的 `--fix` 会删掉 Prisma JSONB 字段
   必需的 `as object` 断言，实测把 typecheck 打回错误。详见第 9 节经验 ⑦。
 
-质量门禁：`pnpm typecheck`、`pnpm test`、`pnpm lint`。
+质量门禁：**`pnpm typecheck`、`pnpm test`、`pnpm lint`**（三条都必须绿）。
 
-**`format:check` 目前不是门禁**：存量代码从未经过 Prettier，
-全量 `--write` 会产生约 3500 行的纯格式 diff。
-在没有决定「是否一次性格式化」之前，**只对新增/改动的文件跑 Prettier**。
+### 格式化的既定策略：**只格式化新改动，不刷存量**（2026-10-15 决定）
+
+存量代码从未经过 Prettier，全量 `prettier --write` 会产生
+**约 3577 行**（61 个文件）的纯格式 diff，会把真实改动淹没。因此：
+
+- `format:check` **不是质量门禁**，不要因为它报错就去全量格式化；
+- **改完代码后，只对你本次动过的文件跑 Prettier**：
+
+  ```bash
+  # 把「本次改动的文件」换成本次真正动过的路径
+  pnpm exec prettier --write 本次改动的文件
+  ```
+
+- **不要直接跑 `pnpm format`** —— 它的范围是整个仓库，
+  会与本策略冲突（等于偷偷做了一次全量格式化）。
+
+**若将来要改成「全量格式化 + 硬门禁」**（例如项目进入稳定期），
+正确做法是：单独一个**纯格式提交**，提交信息里写明它不含语义改动，
+并考虑加 `.git-blame-ignore-revs` 列出该提交，
+这样 `git blame` 仍能指向真正的逻辑改动。
 
 ---
 
