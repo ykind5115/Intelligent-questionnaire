@@ -501,8 +501,16 @@ function checkValueType(
     push(`题目「${target.id}」是数字题，value 必须是数字`);
   }
   if (type === "single_choice" && options.length > 0) {
-    if (!options.some((o) => o.id === String(value))) {
-      push(`选项 id 不属于题目「${target.id}」：${String(value)}`);
+    // 必须先确认是字符串再比较。
+    // 直接 String(value) 会在 value 是对象/数组时得到 "[object Object]"，
+    // 于是比较**静默失败**，错误信息也变成无意义的 "[object Object]"
+    // —— 这正是 ESLint 的 no-base-to-string 想拦的情况。
+    if (typeof value !== "string") {
+      push(
+        `题目「${target.id}」是单选题，value 必须是选项 id（字符串），实际是 ${typeof value}`
+      );
+    } else if (!options.some((o) => o.id === value)) {
+      push(`选项 id 不属于题目「${target.id}」：${value}`);
     }
   }
   if (type === "multiple_choice" && options.length > 0) {

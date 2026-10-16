@@ -98,45 +98,46 @@ export const aiConversationRepository = {
   /**
    * 追加一条消息，自动分配 sequence_no。
    *
-   * 为什么在一个事务里「先取最大值再插入」：
+   * 为什么「先取最大值再插入」：
    *   (conversation_id, sequence_no) 是唯一约束，
    *   并发写入时若各自算出的序号相同，一方会失败。
-   *   放在同一事务内可让冲突串行化，失败时由调用方重试。
+   *
+   * 注意（曾经的真实缺陷）：这里**必须用传入的 client**。
+   *   早先的实现忽略了 client、自己调用 `prisma.$transaction` 另开一个事务 ——
+   *   于是调用方传进来的 `tx` 被**静默忽略**，本该与外围同生共死的写入
+   *   实际落在了另一个事务里。参数形同虚设，且不报任何错。
+   *   ESLint 的 no-unused-vars 正是把这个问题揪出来的。
    */
   async appendMessage(
     input: AppendMessageInput,
     client: DbClient = prisma
   ): Promise<AiMessageRow> {
-    return prisma.$transaction(async (tx) => {
-      const last = await tx.aiMessage.findFirst({
-        where: { conversationId: input.conversationId },
-        orderBy: { sequenceNo: "desc" },
-        select: { sequenceNo: true },
-      });
+    const last = await client.aiMessage.findFirst({
+      where: { conversationId: input.conversationId },
+      orderBy: { sequenceNo: "desc" },
+      select: { sequenceNo: true },
+    });
 
-      const sequenceNo = (last?.sequenceNo ?? 0) + 1;
+    const sequenceNo = (last?.sequenceNo ?? 0) + 1;
 
-      return tx.aiMessage.create({
-        data: {
-          id: newId(),
-          conversationId: input.conversationId,
-          role: input.role,
-          content: input.content ?? null,
-          sequenceNo,
-          ...(input.toolName !== undefined
-            ? { toolName: input.toolName }
-            : {}),
-          ...(input.toolCallId !== undefined
-            ? { toolCallId: input.toolCallId }
-            : {}),
-          ...(input.toolCalls !== undefined
-            ? { toolArguments: toJsonValue(input.toolCalls) }
-            : {}),
-          ...(input.toolResult !== undefined
-            ? { toolResult: toJsonValue(input.toolResult) }
-            : {}),
-        },
-      });
+    return client.aiMessage.create({
+      data: {
+        id: newId(),
+        conversationId: input.conversationId,
+        role: input.role,
+        content: input.content ?? null,
+        sequenceNo,
+        ...(input.toolName !== undefined ? { toolName: input.toolName } : {}),
+        ...(input.toolCallId !== undefined
+          ? { toolCallId: input.toolCallId }
+          : {}),
+        ...(input.toolCalls !== undefined
+          ? { toolArguments: toJsonValue(input.toolCalls) }
+          : {}),
+        ...(input.toolResult !== undefined
+          ? { toolResult: toJsonValue(input.toolResult) }
+          : {}),
+      },
     });
   },
 

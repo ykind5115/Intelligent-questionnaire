@@ -22,7 +22,6 @@ import {
   type ChatOptions,
   type ChatResult,
   type LLMProvider,
-  type ProviderToolSpec,
   type ToolCallRequest,
 } from "./llm-provider.js";
 
@@ -203,7 +202,7 @@ export class DeepSeekProvider implements LLMProvider {
       body["max_tokens"] = options.maxTokens;
     }
     if (options.tools && options.tools.length > 0) {
-      body["tools"] = options.tools as ProviderToolSpec[];
+      body["tools"] = options.tools;
       body["tool_choice"] = "auto";
     }
     if (options.parallelToolCalls !== undefined) {
@@ -333,10 +332,14 @@ export class DeepSeekProvider implements LLMProvider {
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        // 显式收窄：res.body 的流类型在不同 @types/node 版本下会解析成 any，
+        // 隐式 any 会让后续 decode 失去类型保护（ESLint no-unsafe-* 系列正是拦这个）。
+        // 同时 done 为 true 时 value 可能是 undefined，这里一并挡掉。
+        const read: { done: boolean; value?: Uint8Array } = await reader.read();
+        if (read.done) break;
+        if (!read.value) continue;
 
-        buffer += decoder.decode(value, { stream: true });
+        buffer += decoder.decode(read.value, { stream: true });
 
         // SSE：事件之间以空行分隔
         const parts = buffer.split("\n\n");
@@ -350,7 +353,16 @@ export class DeepSeekProvider implements LLMProvider {
             const payload = trimmed.slice(5).trim();
             if (payload === "[DONE]") continue;
 
-            let chunk: {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(payload);
+            } catch {
+              continue; // 忽略无法解析的分片，不中断整个流
+            }
+
+            // JSON.parse 的结果是 any，这里断言成约定的分片形状。
+            // 断言而不是直接赋值：直接赋值会让整段下游代码都失去类型保护。
+            const chunk = parsed as {
               model?: string;
               choices?: {
                 delta?: {
@@ -364,12 +376,6 @@ export class DeepSeekProvider implements LLMProvider {
                 finish_reason?: string;
               }[];
             };
-
-            try {
-              chunk = JSON.parse(payload);
-            } catch {
-              continue; // 忽略无法解析的分片，不中断整个流
-            }
 
             if (chunk.model) model = chunk.model;
 
