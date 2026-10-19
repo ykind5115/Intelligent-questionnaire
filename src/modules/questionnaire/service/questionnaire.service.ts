@@ -35,6 +35,7 @@ import {
   setQuestionBranch,
   updateQuestion,
   updateSection,
+  setNodeLayout,
   uuidIdFactory,
   type AddQuestionInput,
   type AddSectionInput,
@@ -1023,6 +1024,65 @@ export const questionnaireService = {
         details: outcome.details,
       };
     });
+  },
+
+  // ----------------------------------------------------------
+  // 节点画布坐标（只动 layout，不动结构）
+  // ----------------------------------------------------------
+
+  /**
+   * 保存节点画布的坐标。
+   *
+   * 与 applyToTemplateVersion 的三点区别（都是有意的）：
+   *   1. **不产生审计**：拖节点不是工具调用，记进审计只会淹没真正的结构改动；
+   *   2. **不走整份结构覆盖**：只更新 layout 键，因此拖节点与改题目可以并发，
+   *      不会互相冲掉（见 repository.mergeTemplateVersionLayout）；
+   *   3. **不做结构校验**：坐标不影响合法性；若在这里跑 assertValidSchema，
+   *      一个本来就非法的旧草稿会连「摆位置」都做不了。
+   *
+   * 权限与状态检查仍然照做：只有 template_admin 能改，且只能改 draft。
+   */
+  async saveNodeLayout(
+    versionId: string,
+    positions: Record<string, { x: number; y: number }>,
+    ctx: ServiceContext
+  ): Promise<void> {
+    assertTemplateAdmin(ctx);
+    assertServiceContext(ctx);
+
+    const version = await questionnaireRepository.findTemplateVersionById(
+      versionId
+    );
+    if (!version) {
+      throw new OperationError(
+        ErrorCode.TEMPLATE_VERSION_NOT_FOUND,
+        `模板版本不存在：${versionId}`
+      );
+    }
+
+    if (version.status !== "draft") {
+      throw new OperationError(
+        ErrorCode.PERMISSION_DENIED,
+        `模板版本状态为 ${version.status}，只有 draft 版本允许修改`
+      );
+    }
+
+    // 用纯函数算出「合并 + 剔除已删除题目」后的完整 layout，
+    // 再只把 layout 这一个键写回库。
+    const next = setNodeLayout(version.schema, { positions });
+
+    const affected = await questionnaireRepository.mergeTemplateVersionLayout({
+      versionId,
+      layout: next.layout ?? {},
+    });
+
+    if (affected === 0) {
+      // 并发下可能刚被发布
+      throw new OperationError(
+        ErrorCode.PERMISSION_DENIED,
+        "模板版本状态已变化（可能刚被发布），坐标未保存"
+      );
+    }
   },
 
   // ----------------------------------------------------------

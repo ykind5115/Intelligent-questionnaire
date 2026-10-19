@@ -75,4 +75,7 @@ export type {
   ReorderSectionsInput,
   ReorderQuestionsInput,
   SetQuestionBranchInput,
+  SetNodeLayoutInput,
 } from "./types.js";
+
+export { setNodeLayout } from "./set-node-layout.js";

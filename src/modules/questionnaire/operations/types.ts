@@ -127,3 +127,16 @@ export interface SetQuestionBranchInput {
    */
   defaultNext?: string | null;
 }
+
+/**
+ * set_node_layout：写入节点画布的坐标。
+ *
+ * 为什么坐标单独一个操作、而不是并进 update_question：
+ *   坐标是**纯呈现信息**，与「题目内容」是两类改动。
+ *   并进 update_question 会让每次拖动节点都产生一条结构审计、
+ *   并触发结构校验 —— 拖个节点不该走那条重路径。
+ */
+export interface SetNodeLayoutInput {
+  /** 键 = 题目 id；值 = 画布上的左上角逻辑坐标 */
+  positions: Record<string, { x: number; y: number }>;
+}

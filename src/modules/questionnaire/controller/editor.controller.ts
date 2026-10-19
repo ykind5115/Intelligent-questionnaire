@@ -204,6 +204,29 @@ const setBranchBody = z.object({
   expectedRevision: expectedRevisionSchema,
 });
 
+/**
+ * 节点画布坐标（只含本次拖动过的节点）。
+ *
+ * 为什么允许「只传一部分」：
+ *   前端每次拖动结束只提交动过的那几个节点，其余位置由 Service 与
+ *   已有 layout 合并保留（见 setNodeLayout）。要求提交全量会让
+ *   前端必须维护一份完整的坐标镜像，多一份状态就多一处不一致。
+ *
+ * 上限 2000：一份问卷的节点数是十几到几十的量级，
+ * 这个上限只是防止畸形请求把 schema 撑大。
+ */
+const nodeLayoutBody = z.object({
+  positions: z
+    .record(
+      z.string().min(1),
+      z.object({
+        x: z.number().finite(),
+        y: z.number().finite(),
+      })
+    )
+    .refine((r) => Object.keys(r).length <= 2000, "一次最多保存 2000 个节点坐标"),
+});
+
 type OperationPayload = Parameters<
   typeof questionnaireService.applyToInstance
 >[1];
@@ -633,6 +656,29 @@ export function createTemplateEditorRouter(): Router {
         },
       };
     }
+  );
+
+  // ---- 保存节点画布坐标 ----
+  //
+  // 与其他操作不同，这里**不走 registerOperations**：
+  //   坐标不是结构改动，不该产生审计、也不该走结构校验与乐观锁。
+  //   Service 只更新 schema 的 layout 键（见 mergeTemplateVersionLayout），
+  //   因此拖节点与改题目可以并发而不互相覆盖。
+  router.patch(
+    "/:templateId/versions/:versionId/layout",
+    validate({ params: versionParams, body: nodeLayoutBody }),
+    asyncHandler(async (req, res) => {
+      const { versionId } = req.params as z.infer<typeof versionParams>;
+      const body = req.body as z.infer<typeof nodeLayoutBody>;
+
+      await questionnaireService.saveNodeLayout(
+        versionId,
+        body.positions,
+        serviceContextOf(req)
+      );
+
+      sendSuccess(req, res, { saved: Object.keys(body.positions).length });
+    })
   );
 
   return router;

@@ -702,8 +702,36 @@ export const questionnaireRepository = {
     return result.count;
   },
 
-  /** 同时更新实例状态（确认 / 撤回等流转用） */
-  async updateInstanceStatus(
+  /**
+   * **只**更新模板草稿里的 layout 键（节点画布坐标）。
+   *
+   * 为什么不用 updateTemplateVersionSchema 整份覆盖：
+   *   坐标是纯呈现信息，而结构编辑是业务改动。若坐标写入走「读整份→改→写整份」，
+   *   两个人同时操作（一个拖节点、一个改题目）时，后写者会把前者的结构改动冲掉。
+   *   这里用 jsonb_set 只改 layout 这一个键，**结构部分原样保留**，
+   *   因此拖节点永远不会影响结构，两者可以并发。
+   *
+   * 只改 draft：与 04 文档第 11.1 节一致（发布后不可直接修改）。
+   * 同样不写审计 —— 拖节点不是「工具调用」，记进审计只会淹没真正的结构改动。
+   */
+  async mergeTemplateVersionLayout(
+    params: {
+      versionId: string;
+      layout: Record<string, { x: number; y: number }>;
+    },
+    client: DbClient = prisma
+  ): Promise<number> {
+    // $executeRaw 的模板串会对参数做参数化，不存在拼接注入
+    return client.$executeRaw`
+      UPDATE questionnaire_template_versions
+      SET schema = jsonb_set(schema, '{layout}', ${JSON.stringify(
+        params.layout
+      )}::jsonb, true)
+      WHERE id = ${params.versionId}::uuid AND status = 'draft'
+    `;
+  },
+
+  /** 同时更新实例状态（确认 / 撤回等流转用） */  async updateInstanceStatus(
     params: { instanceId: string; status: string },
     client: DbClient = prisma
   ) {

@@ -285,6 +285,27 @@ export function registerFlowChecker(checker: FlowChecker): void {
   flowChecker = checker;
 }
 
+/**
+ * 节点画布坐标（可选）。
+ *
+ * 键 = 题目 id；值 = 该节点在画布上的**左上角**逻辑坐标。
+ * 缺失表示「还没摆过」，编辑器会退化为自动布局。
+ *
+ * 为什么放在结构里、而不是另建一张表：
+ *   坐标是这份结构的一部分（换个人打开应该看到同样的排布），
+ *   且它不改动任何既有字段的语义（决策 D16：只做加法）。
+ *
+ * 为什么坐标**不参与**结构校验：
+ *   它纯属呈现信息。坐标缺失、多余、指向已删除的题目，
+ *   都不该让整份结构变得非法 —— 否则删一道题就会让旧草稿打不开。
+ */
+export const nodeLayoutSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+});
+
+export type NodeLayout = z.infer<typeof nodeLayoutSchema>;
+
 export const questionnaireSchema = z
   .object({
     id: z.string().min(1),
@@ -293,6 +314,8 @@ export const questionnaireSchema = z
     sections: z.array(sectionSchema),
     version: z.number().int().nonnegative(),
     metadata: z.record(z.string(), z.unknown()).optional(),
+    /** 节点画布的坐标；见 nodeLayoutSchema 的说明 */
+    layout: z.record(z.string(), nodeLayoutSchema).optional(),
   })
   .superRefine((q, ctx) => {
     // 决策：V1 不支持 section 嵌套（03 文档第 5A 节）
