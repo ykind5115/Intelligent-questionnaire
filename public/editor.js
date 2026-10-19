@@ -418,12 +418,12 @@ async function callApi(method, path, body, { revisionInQuery = false } = {}) {
 
   try {
     const data = await api(method, `${apiBase()}${finalPath}`, payload);
-    await reloadSchema();
+    await refreshAfterWrite();
     return data;
   } catch (e) {
     if (e.code === "REVISION_CONFLICT") {
       toast("这个版本刚被别处改过，已重新载入。请确认后重试。", true);
-      await reloadSchema();
+      await refreshAfterWrite();
     } else if (e.code === "PERMISSION_DENIED") {
       toast(
         state.versionStatus !== "draft"
@@ -509,6 +509,7 @@ function ensureGraph() {
       if (q) editQuestion(q);
     },
     onBranchEdit: (id, prefillGoTo) => openBranchEditor(id, { prefillGoTo }),
+    onEdgeClick: (edge) => openEdgeEditor(edge),
     onToast: toast,
     saveLayout: saveNodeLayout,
   });
@@ -1785,6 +1786,249 @@ function openBranchEditor(questionId, options = {}) {
 }
 
 // ============================================================
+// 边的编辑（删除 / 改跳到）
+// ============================================================
+
+/**
+ * 三种边 + 终点边的含义说明。
+ *
+ * 这里必须写清楚，因为「为什么这两个节点之间会有一条线」正是最容易困惑的地方：
+ * 没配「否则」时，相邻两题之间**自动**存在一条顺序边 —— 它是默认行为，
+ * 不是谁显式连的。要断开它，只能把「否则」显式设成「本题结束」。
+ */
+const EDGE_KIND_INFO = {
+  branch: {
+    title: "分支边",
+    desc: "命中条件时才走这条线。删掉它 = 从该题的分支规则里移除这一条。",
+  },
+  default: {
+    title: "默认边",
+    desc: "「否则」明确指向了某题。删掉它 = 回到「按题目顺序继续」。",
+  },
+  order: {
+    title: "顺序边",
+    desc:
+      "没有配置「否则」时的默认走向 —— 按题目顺序走下一题。" +
+      "这条线是**自动存在**的，不是谁连上去的。删掉它 = 本题作答后问卷结束。",
+  },
+  end: {
+    title: "终点边",
+    desc: "本题作答后问卷结束（「否则」= 结束）。改成「按顺序」= 继续走下一题。",
+  },
+};
+
+/**
+ * 写回一道题的跳转配置。
+ *
+ * 关键：`branches` 必须**显式提交**（哪怕是空数组）。
+ * 后端是整体替换语义，省略 branches 会清空既有分支 ——
+ * 所以这里永远把当前完整的分支列表带上，只改动其中一条。
+ */
+async function writeBranchConfig(questionId, branches, defaultNext) {
+  const payload = { branches };
+  if (defaultNext !== undefined) payload.defaultNext = defaultNext;
+
+  return callApi(
+    "PATCH",
+    `/questions/${encodeURIComponent(questionId)}/branch`,
+    payload
+  );
+}
+
+/**
+ * 点选一条边后的操作面板。
+ *
+ * 为什么用弹窗而不是边上飘一个小菜单：
+ *   这条边「是什么、为什么存在、删掉意味着什么」需要解释，
+ *   而图上没地方放这段文字。弹窗还能同时给出「改跳到」的候选。
+ */
+function openEdgeEditor(edge) {
+  const fromQ = findQuestion(edge.from);
+  if (!fromQ) {
+    toast("这条连接的起始题目已不存在，请刷新", true);
+    return;
+  }
+
+  const info = EDGE_KIND_INFO[edge.kind] ?? { title: edge.kind, desc: "" };
+
+  const posOf = new Map(state.questions.map((x, i) => [x.id, i]));
+  const selfPos = posOf.get(edge.from);
+  const later = state.questions.filter((x) => posOf.get(x.id) > selfPos);
+  const isLast = later.length === 0;
+
+  const toLabel = edge.to ? questionTitle(edge.to) : "结束";
+
+  const backdrop = el("div", { className: "modal-backdrop" });
+  const modal = el("div", { className: "modal" });
+
+  const head = el("div", { className: "modal-head" });
+  head.appendChild(el("h3", { text: `连接：${fromQ.title} → ${toLabel}` }));
+  modal.appendChild(head);
+
+  const body = el("div", { className: "modal-body" });
+
+  const kindRow = el("div", { className: "edge-kind-row" });
+  kindRow.appendChild(
+    el("span", { className: `edge-kind-badge edge-${edge.kind}`, text: info.title })
+  );
+  if (edge.kind === "branch" && edge.label) {
+    kindRow.appendChild(el("span", { className: "branch-op", text: edge.label }));
+  }
+  body.appendChild(kindRow);
+  body.appendChild(el("p", { className: "hint", text: info.desc }));
+
+  // ---- 改跳到 ----
+  let targetSel = null;
+  if (later.length > 0) {
+    const row = el("div", { className: "edge-retarget-row" });
+    row.appendChild(el("span", { text: "改跳到" }));
+    targetSel = select(
+      later.map((x) => [x.id, `${x.sectionTitle} / ${x.title}`]),
+      edge.to && later.some((x) => x.id === edge.to) ? edge.to : later[0].id
+    );
+    row.appendChild(targetSel);
+
+    const apply = button("改到这一题", { className: "btn btn-sm btn-primary" });
+    apply.addEventListener("click", async () => {
+      await retargetEdge(edge, targetSel.value);
+      close();
+    });
+    row.appendChild(apply);
+    body.appendChild(row);
+
+    if (edge.kind === "end" || edge.kind === "order") {
+      body.appendChild(
+        el("p", {
+          className: "hint",
+          text: "改成指定题目后，这条连接会变成「默认边」（即「否则」明确指向该题）。",
+        })
+      );
+    }
+  } else if (edge.kind !== "branch") {
+    body.appendChild(
+      el("p", {
+        className: "hint",
+        text: "本题已是最后一题，没有更靠后的题目可以作为跳转目标。",
+      })
+    );
+  }
+
+  // ---- 分支边的条件编辑入口 ----
+  if (edge.kind === "branch") {
+    const editCond = button("编辑该题的全部分支条件", { className: "btn btn-sm" });
+    editCond.addEventListener("click", () => {
+      close();
+      openBranchEditor(edge.from);
+    });
+    body.appendChild(editCond);
+  }
+
+  modal.appendChild(body);
+
+  const foot = el("div", { className: "modal-foot" });
+  const cancel = button("取消");
+  foot.appendChild(cancel);
+
+  const del = button(delLabelOf(edge, isLast), { className: "btn-danger" });
+  del.addEventListener("click", async () => {
+    await deleteEdge(edge, { isLast });
+    close();
+  });
+  foot.appendChild(del);
+
+  modal.appendChild(foot);
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+
+  const close = () => backdrop.remove();
+  cancel.addEventListener("click", close);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close();
+  });
+}
+
+/** 删除按钮的文案：不同边类型的「删除」含义不同，必须说清 */
+function delLabelOf(edge, isLast) {
+  if (edge.kind === "branch") return "删除这条分支";
+  if (edge.kind === "order") {
+    return isLast ? "删除这条连接（仍会结束）" : "删除这条连接（本题结束）";
+  }
+  if (edge.kind === "end") return "删除终点（改成按顺序继续）";
+  return "删除默认边（回到按顺序）";
+}
+
+/** 删除一条边 —— 每种类型对应到结构里的不同字段 */
+async function deleteEdge(edge, { isLast }) {
+  const fromQ = findQuestion(edge.from);
+  if (!fromQ) {
+    toast("题目已不存在，请刷新", true);
+    return;
+  }
+
+  const branches = fromQ.branches ?? [];
+
+  if (edge.kind === "branch") {
+    // 从规则列表里去掉这一条，其余原样保留
+    const remaining = branches.filter((_, i) => i !== edge.index);
+    const data = await writeBranchConfig(edge.from, remaining, fromQ.defaultNext);
+    if (data !== null) toast("已删除这条分支");
+    return;
+  }
+
+  if (edge.kind === "default") {
+    // 「否则」明确指向某题 → 删掉它回到 fallthrough
+    const data = await writeBranchConfig(edge.from, branches, undefined);
+    if (data !== null) toast("已删除默认边：回到按题目顺序继续");
+    return;
+  }
+
+  if (edge.kind === "order") {
+    // 顺序边的「删除」本意是「不要往下走到那一题」。
+    // 而 fallthrough 本身就是「往下走」，所以只有把本题设为终点才能真的断开。
+    if (isLast) {
+      toast("本题已是最后一题，置为终点也仍然是结束", true);
+      return;
+    }
+    const data = await writeBranchConfig(edge.from, branches, null);
+    if (data !== null) toast("已删除顺序连接：本题作答后问卷结束");
+    return;
+  }
+
+  // end：把 defaultNext 清回 undefined（按顺序继续）
+  const data = await writeBranchConfig(edge.from, branches, undefined);
+  if (data !== null) {
+    toast(
+      isLast ? "已改回按顺序；但本题是最后一题，仍然会结束" : "已改回按顺序继续"
+    );
+  }
+}
+
+/** 把一条边的目标改到另一道题 */
+async function retargetEdge(edge, targetId) {
+  const fromQ = findQuestion(edge.from);
+  if (!fromQ) {
+    toast("题目已不存在，请刷新", true);
+    return;
+  }
+
+  const branches = fromQ.branches ?? [];
+
+  if (edge.kind === "branch") {
+    // 只改这一条规则的 goTo，其余规则与 defaultNext 原样保留
+    const next = branches.map((rule, i) =>
+      i === edge.index ? { ...rule, goTo: targetId } : rule
+    );
+    const data = await writeBranchConfig(edge.from, next, fromQ.defaultNext);
+    if (data !== null) toast("已改这条分支的跳转目标");
+    return;
+  }
+
+  // 其它三种边都是 defaultNext 的表达，直接改写它
+  const data = await writeBranchConfig(edge.from, branches, targetId);
+  if (data !== null) toast("已改跳转目标");
+}
+
+// ============================================================
 // 拖拽落点计算
 // ============================================================
 
@@ -1902,6 +2146,21 @@ async function publishCurrent() {
 // ============================================================
 // 载入
 // ============================================================
+
+/**
+ * 写操作成功后刷新本地视图。
+ *
+ * 为什么不能只调 reloadSchema：`reloadSchema` 只更新 state.schema，
+ * 而分支弹窗依赖的 `state.questions`（来自 /flow/structure，含题型、选项、
+ * 展平顺序）是另一份数据。只刷前者会导致：
+ *   - 新增的题目不在 jump 候选里；
+ *   - `questionTitle()` 把新题显示成「（已删除的题目 …）」。
+ */
+async function refreshAfterWrite() {
+  await reloadSchema(); // 内部会 render()
+  await loadStructureDiagnostics();
+  render();
+}
 
 /** 重新拉一次结构（写操作后调用） */
 async function reloadSchema() {

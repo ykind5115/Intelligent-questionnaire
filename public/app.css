@@ -1558,3 +1558,65 @@ textarea:focus {
 .legend-line.edge-end {
   border-top-style: dotted;
 }
+/* 边的点击命中区：透明宽线，专门接收点击 */
+.graph-edge-hit {
+  fill: none;
+  stroke: rgba(0, 0, 0, 0);
+  stroke-width: 16;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+/* 悬停时让整组边变粗，提示「这条可以点」 */
+.graph-edge-group:hover .graph-edge {
+  stroke-width: 3;
+}
+
+.graph-edge-group:hover .graph-edge-label rect {
+  stroke-width: 2;
+}
+/* ============================================================
+   边编辑弹窗
+   ============================================================ */
+
+.edge-kind-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.edge-kind-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #eef2f7;
+  color: var(--muted);
+}
+
+.edge-kind-badge.edge-branch {
+  background: #e6efff;
+  color: #2f6fdb;
+}
+
+.edge-kind-badge.edge-end {
+  background: #f1f5f9;
+  color: var(--muted);
+}
+
+.edge-retarget-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.edge-retarget-row select {
+  max-width: 260px;
+}

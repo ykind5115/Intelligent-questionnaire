@@ -188,6 +188,8 @@ function buildModel(schema, live) {
         kind: "branch",
         from: node.id,
         to: rule.goTo,
+        // 第几条规则：删除/改目标时要定位到具体一条
+        index: i,
         color: EDGE_COLORS[i % EDGE_COLORS.length],
         label: describeRule(rule, byId),
       });
@@ -195,15 +197,22 @@ function buildModel(schema, live) {
 
     // 2) 默认去向
     if (node.defaultNext === null) {
-      edges.push({ kind: "end", from: node.id, to: null });
+      edges.push({ kind: "end", from: node.id, to: null, index: 0 });
     } else if (typeof node.defaultNext === "string") {
       if (byId.has(node.defaultNext)) {
-        edges.push({ kind: "default", from: node.id, to: node.defaultNext });
+        edges.push({
+          kind: "default",
+          from: node.id,
+          to: node.defaultNext,
+          index: 0,
+        });
       }
     } else {
       const next = nextOf(node.id);
       edges.push(
-        next ? { kind: "order", from: node.id, to: next } : { kind: "end", from: node.id, to: null }
+        next
+          ? { kind: "order", from: node.id, to: next, index: 0 }
+          : { kind: "end", from: node.id, to: null, index: 0 }
       );
     }
   }
@@ -269,7 +278,7 @@ function edgeMid(from, to) {
  *   getUnreachable?: () => string[],
  *   canEdit: () => boolean,
  *   onEditQuestion: (id: string) => void,
- *   onBranchEdit: (id: string, prefillGoTo?: string) => void,
+ *   onBranchEdit: (id: string, prefillGoTo?: string) => void,\n *   onEdgeClick?: (edge: {kind: string, from: string, to: string|null, index: number, label: string|null}) => void,
  *   onToast: (msg: string, isError?: boolean) => void,
  *   saveLayout: (positions: Record<string, {x:number,y:number}>) => Promise<void>,
  * }} opts
@@ -512,28 +521,36 @@ export function createNodeGraph(opts) {
       const sy = from.y + NODE_H;
       const dx = model.end.x + 48;
       const dy = model.end.y;
+      const d = `M ${sx} ${sy} C ${sx} ${sy + 54}, ${dx} ${dy - 54}, ${dx} ${dy}`;
+
       g.appendChild(
         s("path", {
           class: "graph-edge edge-end",
-          d: `M ${sx} ${sy} C ${sx} ${sy + 54}, ${dx} ${dy - 54}, ${dx} ${dy}`,
+          d,
           "marker-end": "url(#arrow-solid)",
         })
       );
+      g.appendChild(makeEdgeHit(d, edge));
       return g;
     }
 
     const to = model.byId.get(edge.to);
     if (!to) return null;
 
+    const d = edgePath(from, to);
+
     g.appendChild(
       s("path", {
         class: `graph-edge edge-${edge.kind}`,
-        d: edgePath(from, to),
+        d,
         ...(edge.color ? { stroke: edge.color } : {}),
         "marker-end":
           edge.kind === "branch" ? "url(#arrow-branch)" : "url(#arrow-solid)",
       })
     );
+
+    // 命中区：细线很难点中，盖一条透明的宽线专门接收点击
+    g.appendChild(makeEdgeHit(d, edge));
 
     if (edge.label) {
       const mid = edgeMid(from, to);
@@ -562,6 +579,41 @@ export function createNodeGraph(opts) {
     }
 
     return g;
+  }
+
+  /**
+   * 边的点击命中区。
+   *
+   * 为什么需要单独一条「透明宽线」：SVG 的线只有 1.6px 宽，
+   * 鼠标很难点中；而把可见线加粗又会破坏视觉。所以盖一条
+   * stroke-width 较大的透明线，专门接收点击与悬停。
+   *
+   * 为什么要 stopPropagation：画布的 pointerdown 会把「在空白处按下」
+   * 当成平移起点。点在边上时若继续冒泡，画布会开始平移 —— 手感很怪。
+   */
+  function makeEdgeHit(d, edge) {
+    const hit = s("path", { class: "graph-edge-hit", d });
+
+    hit.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+    });
+
+    hit.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!opts.canEdit()) {
+        opts.onToast?.("当前为只读视图，不能修改连接", true);
+        return;
+      }
+      opts.onEdgeClick?.({
+        kind: edge.kind,
+        from: edge.from,
+        to: edge.to ?? null,
+        index: edge.index ?? 0,
+        label: edge.label ?? null,
+      });
+    });
+
+    return hit;
   }
 
   function renderNode(node, model) {
