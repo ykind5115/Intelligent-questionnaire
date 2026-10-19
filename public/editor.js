@@ -1165,6 +1165,35 @@ const OPERATOR_LABEL = {
 
 /** 不需要 value 的操作符 */
 const VALUELESS_OPERATORS = ["is_answered", "is_empty"];
+
+/**
+ * 某个题型可用的操作符。
+ *
+ * 为什么要按题型限制：后端 checkValueType 会拒绝不相容的组合
+ * （例如多选题用 eq、是非题用文本比较）。如果界面把全部操作符都列出来，
+ * 用户很容易选到「保存时才报错」的组合 —— 那是把校验的成本转嫁给用户。
+ *
+ * 多选题只给 in / not_in：比较单个选项 id 同样是后端会拒的常见笔误。
+ */
+function allowedOps(type) {
+  if (type === "multiple_choice") {
+    return ["in", "not_in", "is_answered", "is_empty"];
+  }
+  return ["eq", "ne", "is_answered", "is_empty"];
+}
+
+/**
+ * 新建规则时的默认操作符。
+ *
+ * 文本/日期类题目做「等于某个字面值」的判定在实践中几乎没意义
+ * （用户输入不可控），因此默认给「已作答」；是非与选择题默认给「等于」。
+ */
+function defaultOpFor(type) {
+  if (type === "text" || type === "textarea" || type === "date" || type === "datetime") {
+    return "is_answered";
+  }
+  return "eq";
+}
 /** 需要「集合」形态 value 的操作符 */
 const SET_OPERATORS = ["in", "not_in"];
 
@@ -1325,12 +1354,33 @@ function openBranchEditor(questionId, options = {}) {
     toast("题目已不存在，请刷新后重试", true);
     return;
   }
-  const others = state.questions.filter((x) => x.id !== q.id);
-
-  if (others.length === 0) {
-    toast("还没有别的题目可以作为跳转目标，先加几道题吧", true);
+  // ---- 可选范围：这是「有向无环图」的界面侧保证 ----
+  //
+  // 跳转目标只能是**本题之后**的题目：所有边同向后，环在结构上就不可能出现。
+  // 条件只能引用**本题或更早**的题目：引用后面的题时，走到本题它还没有答案，
+  // 那条规则永远不会命中（后端 V4b 会拒，这里先不给出这个选项）。
+  //
+  // 位置用的就是 state.questions 的下标 —— 它由 /flow/structure 按
+  // section.order → question.order 展平返回，与后端的顺序定义一致。
+  const posOf = new Map(state.questions.map((x, i) => [x.id, i]));
+  const selfPos = posOf.get(q.id);
+  if (selfPos === undefined) {
+    toast("题目清单还没载入完成，请稍后重试", true);
     return;
   }
+
+  const later = state.questions.filter((x) => posOf.get(x.id) > selfPos);
+  const earlierOrSelf = state.questions.filter((x) => posOf.get(x.id) <= selfPos);
+
+  if (later.length === 0) {
+    toast(
+      "本题是最后一题，后面没有题目可以跳过去 —— 分支要从还有后续题目的题上建",
+      true
+    );
+    return;
+  }
+
+  const labelOf = (x) => `${x.sectionTitle} / ${x.title}`;
 
   // 工作副本：确认前不动 state
   const rules = (q.branches ?? []).map((r) => ({
@@ -1340,14 +1390,21 @@ function openBranchEditor(questionId, options = {}) {
     goTo: r.goTo,
   }));
 
-  // 从画布拖线过来时，预置一条指向目标的规则（条件留空，由用户选）
-  if (options.prefillGoTo && !rules.some((r) => r.goTo === options.prefillGoTo)) {
-    rules.push({
-      op: "eq",
-      questionId: q.id,
-      value: undefined,
-      goTo: options.prefillGoTo,
-    });
+  // 从画布拖线过来时，预置一条指向目标的规则（条件仍由用户选）。
+  // 若拖到了**前面**的节点，明确拒绝并说明原因，而不是存一条非法规则。
+  if (options.prefillGoTo) {
+    if (posOf.get(options.prefillGoTo) > selfPos) {
+      if (!rules.some((r) => r.goTo === options.prefillGoTo)) {
+        rules.push({
+          op: defaultOpFor(q.type),
+          questionId: q.id,
+          value: undefined,
+          goTo: options.prefillGoTo,
+        });
+      }
+    } else {
+      toast("只能跳到本题之后的题目（往前跳会形成环）", true);
+    }
   }
   let defaultNext = q.defaultNext;
 
@@ -1364,7 +1421,9 @@ function openBranchEditor(questionId, options = {}) {
       className: "hint",
       text:
         "按顺序取**第一条命中**的规则；都不命中时看下方的「否则」。\n" +
-        "条件可以引用本题自己 —— 这正是「按本题答案决定是否跳过本题」的常用写法。",
+        "「跳到」只能选本题**之后**的题目 —— 往前跳会形成环，问卷就可能填不完。\n" +
+        "条件可以引用本题自己（最常见的写法），也可以引用**更早**的题目；\n" +
+        "引用后面的题目是不行的：走到本题时它还没有答案，那条规则永远不会命中。",
     })
   );
 
@@ -1387,24 +1446,33 @@ function openBranchEditor(questionId, options = {}) {
       row.appendChild(el("span", { className: "branch-rule-index", text: `${index + 1}` }));
       row.appendChild(el("span", { className: "branch-if", text: "如果" }));
 
-      // 引用哪一题（含本题自己）
-      const qEntries = [
-        [q.id, `${q.title}（本题）`],
-        ...others.map((x) => [x.id, `${x.sectionTitle} / ${x.title}`]),
+      // 引用哪一题：本题 + 更早的题（本题排最前，默认选它）
+      const refEntries = [
+        ...earlierOrSelf
+          .filter((x) => x.id === q.id)
+          .map((x) => [x.id, `${x.title}（本题）`]),
+        ...earlierOrSelf
+          .filter((x) => x.id !== q.id)
+          .map((x) => [x.id, labelOf(x)]),
       ];
-      const qSel = select(qEntries, rule.questionId || q.id);
+      const qSel = select(refEntries, rule.questionId || q.id);
       qSel.addEventListener("change", () => {
         rule.questionId = qSel.value;
         rule.value = undefined; // 换了被引用题目，旧值可能不再合法
+        rule.op = defaultOpFor(questionById(qSel.value)?.type);
         renderRules();
       });
       row.appendChild(qSel);
 
-      // 操作符
-      const opSel = select(
-        Object.entries(OPERATOR_LABEL),
-        rule.op
-      );
+      // 操作符：按被引用题目的题型给候选，避免选出后端必然拒绝的组合
+      const refType = questionById(rule.questionId || q.id)?.type;
+      const opEntries = allowedOps(refType).map((op) => [op, OPERATOR_LABEL[op]]);
+      // 历史数据里可能存在当前题型不允许的操作符，保留它并标出来，
+      // 而不是静默改写用户已存的内容
+      if (rule.op && !allowedOps(refType).includes(rule.op)) {
+        opEntries.unshift([rule.op, `⚠ ${OPERATOR_LABEL[rule.op] ?? rule.op}`]);
+      }
+      const opSel = select(opEntries, rule.op);
       opSel.addEventListener("change", () => {
         rule.op = opSel.value;
         rule.value = undefined;
@@ -1417,12 +1485,19 @@ function openBranchEditor(questionId, options = {}) {
       const control = makeValueControl(target, rule.op, rule.value);
       if (control) row.appendChild(control.node);
 
-      // 跳转目标
+      // 跳转目标：只能是后面的题目
       row.appendChild(el("span", { className: "branch-arrow", text: "跳到" }));
-      const goSel = select(
-        others.map((x) => [x.id, `${x.sectionTitle} / ${x.title}`]),
-        rule.goTo || others[0].id
-      );
+      const goEntries = later.map((x) => [x.id, labelOf(x)]);
+      const goValid = later.some((x) => x.id === rule.goTo);
+      if (rule.goTo && !goValid) {
+        // 已存的目标现在不合法（例如来自旧版本保存的数据）：
+        // 显示出来并标红，保存时会被拦下，让用户明确改掉
+        goEntries.unshift([
+          rule.goTo,
+          `⚠ 无效目标（在本题之前）：${questionTitle(rule.goTo)}`,
+        ]);
+      }
+      const goSel = select(goEntries, rule.goTo || later[0].id);
       row.appendChild(goSel);
 
       const del = button("删除", { className: "btn-ghost danger btn-sm" });
@@ -1460,10 +1535,12 @@ function openBranchEditor(questionId, options = {}) {
     fallbackRow.appendChild(modeSel);
 
     const gotoHolder = el("div", { className: "branch-goto-holder" });
-    const gotoEntries = others.map((x) => [x.id, `${x.sectionTitle} / ${x.title}`]);
+    const gotoEntries = later.map((x) => [x.id, labelOf(x)]);
     const gotoSel = select(
       gotoEntries,
-      typeof defaultNext === "string" ? defaultNext : gotoEntries[0][0]
+      typeof defaultNext === "string" && later.some((x) => x.id === defaultNext)
+        ? defaultNext
+        : gotoEntries[0][0]
     );
     gotoHolder.appendChild(gotoSel);
     gotoHolder.hidden = modeSel.value !== "goto";
@@ -1494,7 +1571,12 @@ function openBranchEditor(questionId, options = {}) {
 
   const addRule = button("+ 添加条件", { className: "btn-sm" });
   addRule.addEventListener("click", () => {
-    rules.push({ op: "eq", questionId: q.id, value: undefined, goTo: others[0].id });
+    rules.push({
+      op: defaultOpFor(q.type),
+      questionId: q.id,
+      value: undefined,
+      goTo: later[0].id,
+    });
     renderRules();
   });
   body.appendChild(addRule);
@@ -1502,6 +1584,41 @@ function openBranchEditor(questionId, options = {}) {
   // ---- 只读预览：让「跳过了谁」可见 ----
   const previewBox = el("div", { className: "branch-preview" });
   body.appendChild(previewBox);
+
+  /**
+   * 构造预览情形。
+   *
+   * 为什么不是固定试「本题选是/否」：
+   *   条件可以引用**更早**的题目。若规则写的是「如果第 1 题 = 是 就跳到第 5 题」，
+   *   只改本题的答案时那条规则永远不命中，三种情形全都显示「按顺序」——
+   *   用户会以为配置没生效。因此这里**按每条已存规则各生成一个情形**，
+   *   把该规则引用的题目设成它的比较值，直接看出这条规则会走成什么样。
+   *
+   * 注意：预览基于**已保存**的结构，刚改还没保存的规则不会出现在里面。
+   */
+  function buildPreviewCases() {
+    const cases = [{ label: "都不命中（按顺序）", answers: {} }];
+
+    (q.branches ?? []).forEach((rule, i) => {
+      const answers = {};
+
+      if (rule.when.op === "is_answered") {
+        // 给一个「非空」的值即可：is_answered 只判断有没有作答
+        answers[rule.when.questionId] = true;
+      } else if (rule.when.op === "is_empty") {
+        // 不设该题，即为未作答
+      } else {
+        answers[rule.when.questionId] = rule.when.value;
+      }
+
+      cases.push({
+        label: `规则${i + 1}：${OPERATOR_LABEL[rule.when.op] ?? rule.when.op} ${describeValue(rule)}`.trim(),
+        answers,
+      });
+    });
+
+    return cases;
+  }
 
   async function refreshPreview() {
     clear(previewBox);
@@ -1513,11 +1630,7 @@ function openBranchEditor(questionId, options = {}) {
         "POST",
         `/api/v1/questionnaire-templates/${state.templateId}/versions/${state.versionId}/flow/cases`,
         {
-          cases: [
-            { label: "按顺序（无命中）", answers: {} },
-            { label: "本题选「是」", answers: { [q.id]: true } },
-            { label: "本题选「否」", answers: { [q.id]: false } },
-          ],
+          cases: buildPreviewCases(),
         }
       );
       clear(previewBox);
@@ -1622,6 +1735,36 @@ function openBranchEditor(questionId, options = {}) {
         toast("「属于/不属于」至少勾选一个选项", true);
         return;
       }
+
+      // 方向校验：与后端 V4 / V4b 同一套规则。
+      // 本地先拦一次，是为了在弹窗里给出**指到具体那条规则**的提示，
+      // 而不是提交后收到一个以题目 id 表述的错误。
+      if (!later.some((x) => x.id === b.goTo)) {
+        toast(
+          `「跳到」只能选本题之后的题目：「${questionTitle(b.goTo)}」在本题之前`,
+          true
+        );
+        return;
+      }
+      if (!earlierOrSelf.some((x) => x.id === b.when.questionId)) {
+        toast(
+          `条件只能引用本题或更早的题目：「${questionTitle(b.when.questionId)}」在本题之后`,
+          true
+        );
+        return;
+      }
+    }
+
+    // 「否则 → 跳到指定题目」同样不能往前跳
+    if (
+      typeof nextDefault === "string" &&
+      !later.some((x) => x.id === nextDefault)
+    ) {
+      toast(
+        `「否则」只能跳到本题之后的题目：「${questionTitle(nextDefault)}」在本题之前`,
+        true
+      );
+      return;
     }
 
     const payload = { branches };
