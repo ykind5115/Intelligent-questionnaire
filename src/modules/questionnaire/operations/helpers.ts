@@ -160,11 +160,39 @@ export function requireNonEmptyText(
  *
  * 这是「Operation 层不可能产出非法结构」的保证点 ——
  * 任何绕过它的修改路径都不允许存在。
+ *
+ * **为什么要把 ZodError 转成 invalidParameter**：
+ *   结构不合法是**调用方的问题**（前端传了非法组合、或某次操作让结构变得
+ *   不合法，例如把题目重排成「分支往前跳」），应当是 400 并说清哪里不合法。
+ *   早先直接 `parse()` 抛 ZodError，而 error-handler 只认 OperationError，
+ *   于是这类错误被兜成 **500 SYSTEM_ERROR** —— 调用方会以为是服务端崩了。
+ *   这个问题在分支落地后变得容易触发：重排、删题都可能让既有分支失效。
+ *
+ * 错误信息里带上**字段路径**，而不是只给一句概括 ——
+ * 「sections.0.questions.2.branches.0.goTo: 分支只能跳到本题之后的题目」
+ * 才定位得到具体是哪一条规则。
  */
 export function assertValidSchema(
   schema: QuestionnaireSchema
 ): QuestionnaireSchema {
-  return questionnaireSchema.parse(schema);
+  const parsed = questionnaireSchema.safeParse(schema);
+  if (parsed.success) return parsed.data;
+
+  const issues = parsed.error.issues;
+  const described = issues.map((issue) => ({
+    path: issue.path.join("."),
+    message: issue.message,
+  }));
+
+  const summary = described
+    .slice(0, 5)
+    .map((i) => (i.path ? `${i.path}: ${i.message}` : i.message))
+    .join("；");
+
+  throw invalidParameter(
+    `问卷结构不合法：${summary}${issues.length > 5 ? ` 等 ${issues.length} 处` : ""}`,
+    { issues: described }
+  );
 }
 
 export type { QuestionnaireSchema, QuestionnaireSection, QuestionnaireQuestion };

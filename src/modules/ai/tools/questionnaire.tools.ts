@@ -422,7 +422,11 @@ export const setQuestionBranchTool = makeTool({
     "所有题目 id 必须来自 get_questionnaire 的结果，绝对不要自己编造。" +
     "op 取值：eq/ne（等于/不等于，配 value）、in/not_in（属于/不属于，value 传数组）、" +
     "is_answered/is_empty（已答/未答，不要传 value）。" +
-    "注意：跳转不能形成没有出口的环（后端会拒绝）。" +
+    "**方向约束（必须遵守）**：" +
+    "go_to 与 default_next 只能指向**本题之后**的题目 —— 往后跳才能保证是有向无环图；" +
+    "往前跳会被后端拒绝（那会形成环，问卷可能填不完）。" +
+    "when.question_id 只能引用**本题自己或更早**的题目 ——" +
+    "引用后面的题目时，走到本题它还没有答案，规则永远不会命中，后端同样会拒绝。" +
     "清除某题的分支：branches 传空数组、且不要传 default_next。",
   inputSchema: z.object({
     target_id: targetIdSchema,
@@ -448,7 +452,10 @@ export const setQuestionBranchTool = makeTool({
                 ),
             })
             .describe("命中条件"),
-          go_to: z.string().min(1).describe("命中后跳到哪一题"),
+          go_to: z
+            .string()
+            .min(1)
+            .describe("命中后跳到哪一题（必须是本题之后的题目）"),
         })
       )
       .optional()

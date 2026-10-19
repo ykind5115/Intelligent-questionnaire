@@ -32,7 +32,7 @@ import {
   type QuestionnaireSchema,
   type QuestionType,
 } from "../../questionnaire/schema/questionnaire.schema.js";
-import { resolveFlow } from "../../questionnaire/operations/index.js";
+import { buildFlowIndex, resolveFlow } from "../../questionnaire/operations/index.js";
 import type { ServiceContext } from "../../questionnaire/service/questionnaire.service.js";
 
 // ============================================================
@@ -168,6 +168,11 @@ function parseSchema(raw: unknown, subject: string): QuestionnaireSchema {
  *
  * 返回 type 是必需的：保存答案时要按题型校验答案形状
  * （05 文档第 15.4 节）。
+ *
+ * **按 order 排序**，而不是按数组下标：结构里的数组顺序与 order 字段
+ * 理论上应当一致（各重排操作会同时改写两者），但一旦出现不一致，
+ * 「一堆按数组、一堆按 order」的两套顺序会让排查变得极难。
+ * 这里与 `buildFlowIndex` 的排序规则（section.order → question.order）保持一致。
  */
 function collectQuestions(
   schema: QuestionnaireSchema
@@ -179,11 +184,13 @@ function collectQuestions(
     type: QuestionType;
   }[] = [];
 
-  const walk = (
-    sections: QuestionnaireSchema["sections"]
-  ): void => {
-    for (const section of sections) {
-      for (const question of section.questions) {
+  const walk = (sections: QuestionnaireSchema["sections"]): void => {
+    const sortedSections = [...sections].sort((a, b) => a.order - b.order);
+    for (const section of sortedSections) {
+      const sortedQuestions = [...section.questions].sort(
+        (a, b) => a.order - b.order
+      );
+      for (const question of sortedQuestions) {
         out.push({
           id: question.id,
           required: question.required,
@@ -225,8 +232,13 @@ function safeResolveFlow(
   try {
     return resolveFlow(schema, answers);
   } catch {
+    // 降级也要用**流程顺序**（section.order → question.order），
+    // 而不是数组下标顺序：这是用户在填写页看到的顺序，
+    // 两份顺序不一致时降级后的呈现会突然错乱。
     return {
-      steps: collectQuestions(schema).map((q) => ({ questionId: q.id })),
+      steps: buildFlowIndex(schema).ordered.map((questionId) => ({
+        questionId,
+      })),
       endedBy: "exhausted",
     };
   }

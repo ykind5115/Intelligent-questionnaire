@@ -117,6 +117,7 @@ type QKey = "has" | "date" | "reason" | "note";
 interface Fixture {
   templateId: string;
   versionId: string;
+  sectionId: string;
   ids: Record<QKey, string>;
   /** 在指定题上装一条「按 has 的答案跳转」的分支 */
   branch: (question: QKey, whenHas: boolean, goTo: QKey) => Promise<void>;
@@ -200,7 +201,7 @@ async function buildFixture(
     await branch("has", true, "note");
   }
 
-  return { templateId, versionId, ids, branch };
+  return { templateId, versionId, sectionId, ids, branch };
 }
 
 /** 发布模板版本并建一个已下发的案件（指派给 investigator） */
@@ -399,6 +400,99 @@ describe("设置分支（REST）", () => {
 
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(JSON.stringify(res.body.error)).toMatch(/收敛|环/);
+  });
+
+  it("**往前跳**（目标是本题之前的题）→ 400，并说明会形成环", async () => {
+    const fx = await buildFixture({ withGates: false });
+
+    // reason 是第 3 题，date 是第 2 题 —— 往前跳
+    const res = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["reason"]}/branch`,
+      {
+        userId: USERS.admin,
+        body: {
+          branches: [
+            {
+              when: { op: "is_answered", questionId: fx.ids["reason"] },
+              goTo: fx.ids["date"],
+            },
+          ],
+        },
+      }
+    );
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.error)).toMatch(/本题之前|本题之后/);
+  });
+
+  it("**条件引用后面的题目** → 400（那种规则永远不会命中）", async () => {
+    const fx = await buildFixture({ withGates: false });
+
+    // has 是第 1 题，却拿第 4 题 note 的答案做判断
+    const res = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["has"]}/branch`,
+      {
+        userId: USERS.admin,
+        body: {
+          branches: [
+            {
+              when: { op: "is_answered", questionId: fx.ids["note"] },
+              goTo: fx.ids["date"],
+            },
+          ],
+        },
+      }
+    );
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.error)).toMatch(/永远不会命中|更早/);
+  });
+
+  it("**重排导致既有分支变成往前跳** → 400 而不是 500（回归）", async () => {
+    // 这是 assertValidSchema 曾把 ZodError 直接抛出的后果：
+    // error-handler 只认 OperationError，于是结构不合法被兜成 500 SYSTEM_ERROR，
+    // 调用方会以为服务端崩了。分支落地后「重排/删题让既有分支失效」很常见。
+    const fx = await buildFixture({ withGates: false });
+
+    // date(第2题) 分支到 note(第4题)：合法
+    const set = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["date"]}/branch`,
+      {
+        userId: USERS.admin,
+        body: {
+          branches: [
+            {
+              when: { op: "is_answered", questionId: fx.ids["date"] },
+              goTo: fx.ids["note"],
+            },
+          ],
+        },
+      }
+    );
+    expect(set.status, JSON.stringify(set.body.error)).toBe(200);
+
+    // 把 note 挪到最前 → date 的分支变成往前跳
+    const reorder = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/reorder`,
+      {
+        userId: USERS.admin,
+        body: {
+          sectionId: fx.sectionId,
+          questionIds: [fx.ids["note"], fx.ids["has"], fx.ids["date"], fx.ids["reason"]],
+        },
+      }
+    );
+
+    expect(reorder.status).toBe(400);
+    expect(JSON.stringify(reorder.body.error)).toMatch(/本题之前|本题之后/);
   });
 
   it("分支指向不存在的**条件**题目 → 被拒绝", async () => {

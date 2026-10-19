@@ -336,6 +336,142 @@ describe("resolveFlow：多路径汇聚", () => {
 });
 
 // ============================================================
+// 方向约束：边只能向后（保证有向无环图）
+// ============================================================
+
+describe("checkFlow：方向约束（V4 / V4b）", () => {
+  it("分支跳到前面的题目 → 被拒绝，并说明会形成环", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1 },
+      {
+        id: "q2",
+        order: 2,
+        branches: [{ when: { op: "is_answered", questionId: "q1" }, goTo: "q1" }],
+      },
+    ]);
+
+    const msgs = messagesOf(schema);
+    expect(msgs.some((m) => m.includes("本题之前") || m.includes("本题之后"))).toBe(
+      true
+    );
+  });
+
+  it("分支跳到**自己** → 被拒绝（自环）", () => {
+    const schema = schemaOf([
+      {
+        id: "q1",
+        order: 1,
+        type: "boolean",
+        branches: [{ when: { op: "eq", questionId: "q1", value: true }, goTo: "q1" }],
+      },
+    ]);
+    expect(messagesOf(schema).length).toBeGreaterThan(0);
+  });
+
+  it("defaultNext 指向前面的题目 → 被拒绝", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1 },
+      { id: "q2", order: 2, defaultNext: "q1" },
+    ]);
+    expect(messagesOf(schema).some((m) => m.includes("本题之前"))).toBe(true);
+  });
+
+  it("**跨分组**回跳同样被拒绝（方向按跨分组的展平顺序判定）", () => {
+    const schema = {
+      sections: [
+        {
+          id: "sec_1",
+          order: 1,
+          questions: [{ id: "q1", order: 1 }],
+        },
+        {
+          id: "sec_2",
+          order: 2,
+          questions: [
+            {
+              id: "q2",
+              order: 1,
+              branches: [
+                { when: { op: "is_answered", questionId: "q1" }, goTo: "q1" },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expect(messagesOf(schema as never).length).toBeGreaterThan(0);
+  });
+
+  it("向后跳（本题之后）→ 通过", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1, type: "boolean" },
+      {
+        id: "q2",
+        order: 2,
+        branches: [
+          { when: { op: "eq", questionId: "q1", value: true }, goTo: "q4" },
+        ],
+      },
+      { id: "q3", order: 3 },
+      { id: "q4", order: 4 },
+    ]);
+    expect(checkFlow(schema)).toEqual([]);
+  });
+
+  it("条件引用**后面的**题目 → 被拒绝（走到本题时它还没答案，规则永不命中）", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1, type: "boolean" },
+      {
+        id: "q2",
+        order: 2,
+        branches: [
+          // 引用 q3（在后面）—— 这条规则永远不会命中
+          { when: { op: "eq", questionId: "q3", value: true }, goTo: "q4" },
+        ],
+      },
+      { id: "q3", order: 3, type: "boolean" },
+      { id: "q4", order: 4 },
+    ]);
+
+    const msgs = messagesOf(schema);
+    expect(msgs.some((m) => m.includes("永远不会命中"))).toBe(true);
+  });
+
+  it("条件引用**更早的**题目 → 允许（这是「按前面的答案决定去向」的常见写法）", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1, type: "boolean" },
+      { id: "q2", order: 2, type: "text" },
+      {
+        id: "q3",
+        order: 3,
+        branches: [
+          { when: { op: "eq", questionId: "q1", value: true }, goTo: "q4" },
+        ],
+      },
+      { id: "q4", order: 4 },
+    ]);
+    expect(checkFlow(schema)).toEqual([]);
+  });
+
+  it("条件引用**本题自己** → 允许（最常见的「按本题答案决定去向」）", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1, type: "boolean" },
+      {
+        id: "q2",
+        order: 2,
+        type: "boolean",
+        branches: [
+          { when: { op: "eq", questionId: "q2", value: false }, goTo: "q4" },
+        ],
+      },
+      { id: "q3", order: 3 },
+      { id: "q4", order: 4 },
+    ]);
+    expect(checkFlow(schema)).toEqual([]);
+  });
+});
+
+// ============================================================
 // 环收敛检测
 // ============================================================
 

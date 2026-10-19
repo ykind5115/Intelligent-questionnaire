@@ -360,10 +360,15 @@ export interface FlowIssue {
 /**
  * 校验跳转关系的**图级**正确性。
  *
- * 检查项（计划 §4.7）：
+ * 检查项（计划 §4.7，其中 V4 / V4b 是 2026-10-19 补的）：
  *   V1  `goTo` / `defaultNext` 指向的题目必须存在（悬空引用）→ 报错
  *   V1b 条件引用的题目必须存在 → 报错
+ *   **V4  `goTo` / `defaultNext` 只能指向本题之后的题目** → 报错
+ *       （所有边同向，保证结构是有向无环图）
+ *   **V4b 条件只能引用本题或更早的题目** → 报错
+ *       （引用后面的题时，走到本题它还没有答案，规则永远不会命中）
  *   V2  从入口出发必须能走到结束（环必须收敛）→ 报错
+ *       （有了 V4 之后环不可能出现，这一条退化为对历史结构的兜底）
  *   V3  比较值的类型必须与被引用题目的题型相容 → 报错
  *
  * 注意「不可达题目」（V5）**不在这里报错**：它只是告警，
@@ -404,6 +409,83 @@ export function checkFlow(schema: FlowSchemaLike): FlowIssue[] {
 
   // 悬空引用会让后面的搜索无从下手，先返回
   if (issues.length > 0) return issues;
+
+  // ---- V4：边只能指向「后面」的题目 ----
+  //
+  // 这是**结构是不是有向无环图**的根本保证。
+  //
+  // 为什么必须卡在这：
+  //   跳转目标如果可以是任意题目，就能轻易构造出 A→C、C→A 这样的环，
+  //   而「问卷要能填完」要求路径必须收敛。仅靠「步数超上限」在运行时发现环，
+  //   等于把错误推迟到用户填写时；而且一个回跳（哪怕是看起来合法的
+  //   「答错就回去重答上一题」）在实践中几乎总是环的第一步。
+  //
+  // 因此规则定为：goTo / defaultNext 的题目必须在本题**之后**
+  // （按 section.order → question.order 展平后的位置严格更大）。
+  // 这样所有边同向，环在结构上就不可能出现，V2 退化为兜底。
+  const position = new Map<string, number>();
+  index.ordered.forEach((id, i) => position.set(id, i));
+
+  schema.sections.forEach((section, si) => {
+    section.questions.forEach((q, qi) => {
+      const base = ["sections", si, "questions", qi] as (string | number)[];
+      const selfPos = position.get(q.id);
+
+      (q.branches ?? []).forEach((rule, bi) => {
+        const toPos = position.get(rule.goTo);
+        if (toPos === undefined || selfPos === undefined) return; // 悬空已在上面报过
+
+        if (toPos <= selfPos) {
+          issues.push({
+            path: [...base, "branches", bi, "goTo"],
+            message:
+              `分支只能跳到本题之后的题目（否则会形成环）：` +
+              `「${rule.goTo}」在本题之前或就是本题`,
+          });
+        }
+      });
+
+      if (typeof q.defaultNext === "string") {
+        const toPos = position.get(q.defaultNext);
+        if (toPos !== undefined && selfPos !== undefined && toPos <= selfPos) {
+          issues.push({
+            path: [...base, "defaultNext"],
+            message:
+              `默认跳转只能指向本题之后的题目（否则会形成环）：` +
+              `「${q.defaultNext}」在本题之前或就是本题`,
+          });
+        }
+      }
+    });
+  });
+
+  // ---- V4b：条件只能引用「本题或更早」的题目 ----
+  //
+  // 这一条防的是**永远不会命中的死规则**：
+  //   规则挂在 Q5 上，却拿 Q7 的答案做判断。走到 Q5 时 Q7 还没问，
+  //   它的答案必然是空的，于是这条规则**永远不命中** —— 结构合法、不报错、
+  //   但用户配的分支毫无作用。这种「静默失效」是最难查的一类问题。
+  //
+  // 允许引用本题自己：这正是「按本题答案决定去向」的常见写法。
+  schema.sections.forEach((section, si) => {
+    section.questions.forEach((q, qi) => {
+      const base = ["sections", si, "questions", qi] as (string | number)[];
+      const selfPos = position.get(q.id);
+
+      (q.branches ?? []).forEach((rule, bi) => {
+        const refPos = position.get(rule.when.questionId);
+        if (refPos === undefined || selfPos === undefined) return; // 悬空已报
+        if (refPos > selfPos) {
+          issues.push({
+            path: [...base, "branches", bi, "when", "questionId"],
+            message:
+              `分支条件只能引用本题或更早的题目：` +
+              `「${rule.when.questionId}」在本题之后，走到本题时它还没有答案，这条规则永远不会命中`,
+          });
+        }
+      });
+    });
+  });
 
   // ---- V3：比较值类型与题型相容 ----
   schema.sections.forEach((section, si) => {
