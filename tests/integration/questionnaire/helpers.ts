@@ -9,6 +9,7 @@ import { v5 as uuidv5 } from "uuid";
 import { prisma } from "../../../src/database/client.js";
 import { newId } from "../../../src/shared/utils/id.js";
 import type { ServiceContext } from "../../../src/modules/questionnaire/service/questionnaire.service.js";
+import { BASELINE_VERSION_ID } from "../../fixtures/test-baseline.js";
 
 const NS = "6f1a2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b";
 
@@ -63,14 +64,19 @@ export interface TestInstance {
 export async function createTestInstance(
   options: { status?: string } = {}
 ): Promise<TestInstance> {
+  // 用**固定的**测试基准版本，而不是「任意一个已发布版本」。
+  // 后者会随用户停用/发布模板而漂移，导致测试时好时坏；
+  // 基准模板由 tests/global-setup.ts 在整轮测试前后建/删。
   const templateVersion =
-    await prisma.questionnaireTemplateVersion.findFirst({
-      where: { status: "published" },
-      orderBy: { createdAt: "asc" },
+    await prisma.questionnaireTemplateVersion.findUnique({
+      where: { id: BASELINE_VERSION_ID },
     });
 
   if (!templateVersion) {
-    throw new Error("找不到已发布的模板版本，请先执行 pnpm db:seed");
+    throw new Error(
+      "测试基准模板不存在。它由 vitest globalSetup 创建；" +
+        "若你单独运行某个测试文件，请用 pnpm test 而不是直接调用 vitest。"
+    );
   }
 
   const instanceId = newId();

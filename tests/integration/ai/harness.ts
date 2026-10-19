@@ -19,6 +19,7 @@ import { templateService } from "../../../src/modules/questionnaire/service/temp
 import { questionnaireService } from "../../../src/modules/questionnaire/service/questionnaire.service.js";
 import { USERS } from "../questionnaire/helpers.js";
 import { EVAL_CASES } from "../../fixtures/ai-cases/eval-cases.js";
+import { BASELINE_VERSION_ID } from "../../fixtures/test-baseline.js";
 import type {
   EvalCase,
   EvalCaseResult,
@@ -102,13 +103,19 @@ async function runCase(
       targetId = version.id;
       scene = "create_template";
     } else {
-      // 修改类：基于 seed 的无人机模板建一个实例
-      const seedVersion = await prisma.questionnaireTemplateVersion.findFirst({
-        where: { status: "published", template: { name: { contains: "无人机" } } },
-        orderBy: { versionNo: "desc" },
+      // 修改类：基于「测试基准模板」建一个实例。
+      //
+      // 原先找的是 seed 的无人机模板版本，于是需求方一旦停用模板，
+      // 这些用例就整体失败 —— 而它们要验证的是「增量修改是否丢内容」。
+      // 基准模板由 globalSetup 创建（内容与 seed 的无人机问卷同构，
+      // 因此下面对具体题干的断言依然成立），跑完删除。
+      const seedVersion = await prisma.questionnaireTemplateVersion.findUnique({
+        where: { id: BASELINE_VERSION_ID },
       });
       if (!seedVersion) {
-        throw new Error("找不到 seed 的无人机模板版本，请先执行 pnpm db:seed");
+        throw new Error(
+          "测试基准模板不存在（应由 vitest globalSetup 创建）"
+        );
       }
 
       const instance = await questionnaireService.createInstance(

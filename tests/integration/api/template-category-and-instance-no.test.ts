@@ -12,6 +12,7 @@
  * 清理：本文件创建的模板/实例/分类都要删干净，数据库必须回到基线。
  *   分类的删除顺序有讲究 —— 必须先断开模板的引用，否则会被 RESTRICT 拦住。
  */
+import { BASELINE_VERSION_ID } from "../../fixtures/test-baseline.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -158,14 +159,20 @@ async function makeTemplate(
   return { templateId, versionId: expectData<{ id: string }>(v).id };
 }
 
-/** 找一个已发布的模板版本，用于建案件 */
+/**
+ * 测试基准版本 id（用于建案件）。
+ *
+ * 原先找「任意一个已发布版本」，会随用户停用/发布模板而漂移。
+ * 现在用固定 id 的基准版本，由 vitest globalSetup 创建、跑完删除。
+ */
 async function anyPublishedVersionId(): Promise<string> {
-  const v = await prisma.questionnaireTemplateVersion.findFirst({
-    where: { status: "published" },
-    orderBy: { createdAt: "asc" },
+  const v = await prisma.questionnaireTemplateVersion.findUnique({
+    where: { id: BASELINE_VERSION_ID },
     select: { id: true },
   });
-  if (!v) throw new Error("找不到已发布的模板版本，请先执行 pnpm db:seed");
+  if (!v) {
+    throw new Error("测试基准模板不存在（应由 vitest globalSetup 创建）");
+  }
   return v.id;
 }
 
