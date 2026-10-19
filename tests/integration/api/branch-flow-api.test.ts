@@ -495,6 +495,160 @@ describe("设置分支（REST）", () => {
     expect(JSON.stringify(reorder.body.error)).toMatch(/本题之前|本题之后/);
   });
 
+  it("**删除一条分支边**（整体替换时只剩其余规则）→ 该规则消失", async () => {
+    const fx = await buildFixture({ withGates: false });
+
+    // 先给 has 装两条规则
+    const first = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["has"]}/branch`,
+      {
+        userId: USERS.admin,
+        body: {
+          branches: [
+            {
+              when: { op: "eq", questionId: fx.ids["has"], value: true },
+              goTo: fx.ids["note"],
+            },
+            {
+              when: { op: "eq", questionId: fx.ids["has"], value: false },
+              goTo: fx.ids["date"],
+            },
+          ],
+        },
+      }
+    );
+    expect(first.status).toBe(200);
+
+    // 删掉第二条（前端就是这么做的：提交剩下的规则）
+    const del = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["has"]}/branch`,
+      {
+        userId: USERS.admin,
+        body: {
+          branches: [
+            {
+              when: { op: "eq", questionId: fx.ids["has"], value: true },
+              goTo: fx.ids["note"],
+            },
+          ],
+        },
+      }
+    );
+    expect(del.status).toBe(200);
+
+    const v = await apiRequest<{
+      schema: { sections: { questions: { id: string; branches?: unknown[] }[] }[] };
+    }>(client, "GET", base(fx.templateId, fx.versionId), { userId: USERS.admin });
+    const q = expectData<{
+      schema: { sections: { questions: { id: string; branches?: unknown[] }[] }[] };
+    }>(v).schema.sections[0]!.questions.find((x) => x.id === fx.ids["has"]);
+    expect(q?.branches).toHaveLength(1);
+  });
+
+  it("**删除顺序边**：把「否则」设为终点 → 该题之后不再往下走", async () => {
+    const fx = await buildFixture({ withGates: false });
+
+    // 先改结构 —— publish 之后版本只读，改不动了
+    const res = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["date"]}/branch`,
+      { userId: USERS.admin, body: { branches: [], defaultNext: null } }
+    );
+    expect(res.status, JSON.stringify(res.body.error)).toBe(200);
+
+    const instanceId = await publishAndDispatch(fx.templateId, fx.versionId);
+    const fill = await readFill(instanceId);
+
+    await saveAnswers(fill.responseId, [
+      { questionId: fx.ids["has"], answer: false },
+    ]);
+
+    const after = await readFill(instanceId);
+    expect(after.flow.questionIds).toEqual([fx.ids["has"], fx.ids["date"]]);
+    expect(after.flow.endedBy).toBe("explicit");
+  });
+
+  it("**删除终点边**（清掉 defaultNext）→ 恢复按顺序继续", async () => {
+    const fx = await buildFixture({ withGates: false });
+
+    // 先设为终点（发布前改）
+    await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["date"]}/branch`,
+      { userId: USERS.admin, body: { branches: [], defaultNext: null } }
+    );
+    // 再清掉（省略 defaultNext）
+    const res = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["date"]}/branch`,
+      { userId: USERS.admin, body: { branches: [] } }
+    );
+    expect(res.status, JSON.stringify(res.body.error)).toBe(200);
+
+    const instanceId = await publishAndDispatch(fx.templateId, fx.versionId);
+    const fill = await readFill(instanceId);
+
+    await saveAnswers(fill.responseId, [
+      { questionId: fx.ids["has"], answer: false },
+    ]);
+
+    const after = await readFill(instanceId);
+    expect(after.flow.questionIds).toEqual([
+      fx.ids["has"],
+      fx.ids["date"],
+      fx.ids["reason"],
+      fx.ids["note"],
+    ]);
+  });
+
+  it("**改默认边的目标**：defaultNext 换成另一题", async () => {
+    const fx = await buildFixture({ withGates: false });
+
+    // date 原本顺序走到 reason，改成直接跳到 note（发布前改）
+    const res = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["date"]}/branch`,
+      { userId: USERS.admin, body: { branches: [], defaultNext: fx.ids["note"] } }
+    );
+    expect(res.status, JSON.stringify(res.body.error)).toBe(200);
+
+    const instanceId = await publishAndDispatch(fx.templateId, fx.versionId);
+    const fill = await readFill(instanceId);
+
+    await saveAnswers(fill.responseId, [
+      { questionId: fx.ids["has"], answer: false },
+    ]);
+
+    const after = await readFill(instanceId);
+    expect(after.flow.questionIds).toEqual([
+      fx.ids["has"],
+      fx.ids["date"],
+      fx.ids["note"],
+    ]);
+    expect(after.flow.endedBy).toBe("exhausted");
+  });
+
+  it("**省略 branches 却改 defaultNext** → 400，防止静默清空既有分支", async () => {
+    const fx = await buildFixture(); // has 已有一条分支
+    const res = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["has"]}/branch`,
+      { userId: USERS.admin, body: { defaultNext: fx.ids["note"] } }
+    );
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body.error)).toMatch(/branches/);
+  });
+
   it("分支指向不存在的**条件**题目 → 被拒绝", async () => {
     const fx = await buildFixture();
     const res = await apiRequest(

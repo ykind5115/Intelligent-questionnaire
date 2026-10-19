@@ -70,6 +70,25 @@ export function setQuestionBranch(
   // 因此这里**刻意不禁止自引用条件**。
 
   // ---- 写入 ----
+  //
+  // 防误删：`branches` 是**整体替换**语义，省略等于清空。
+  // 如果调用方只想改「否则」的去向、却没带 branches，既有分支会被静默删光 ——
+  // 这正是「删边 / 改边」操作最容易踩的坑（前端按整份状态提交不会踩，
+  // 但 AI 工具或直接调 API 的调用方很容易漏）。
+  // 因此在这种组合下直接拒绝，要求显式提交 branches（要保留就传原列表，要清空传 []）。
+  if (
+    input.branches === undefined &&
+    input.defaultNext !== undefined &&
+    (question.branches?.length ?? 0) > 0
+  ) {
+    throw invalidParameter(
+      `本题已有 ${question.branches!.length} 条分支规则。` +
+        "修改「否则」的去向时必须同时提交 branches（整体替换语义），" +
+        "否则既有分支会被清空；要保留就传原列表，要清空传空数组。",
+      { path: "branches", questionId: input.questionId }
+    );
+  }
+
   if (input.branches && input.branches.length > 0) {
     question.branches = input.branches;
   } else {
