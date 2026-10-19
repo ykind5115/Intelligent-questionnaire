@@ -1326,3 +1326,235 @@ textarea:focus {
     background: #fff4d6;
   }
 }
+/* ============================================================
+   节点画布（Node-based Graph Editor）
+   ============================================================ */
+
+/* 视图切换按钮组 */
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.view-toggle button {
+  border: 0;
+  background: #fff;
+  color: var(--muted);
+  padding: 3px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.view-toggle button + button {
+  border-left: 1px solid var(--border);
+}
+
+.view-toggle button.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+/* 画布容器：必须给一个确定高度，SVG 才能撑满并支持平移缩放 */
+.editor-graph {
+  position: relative;
+  height: min(72vh, 720px);
+  min-height: 420px;
+  border-top: 1px solid var(--border);
+  background: #fbfdff;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.editor-graph:active {
+  cursor: grabbing;
+}
+
+.node-graph {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 触屏上滚轮缩放会与页面滚动打架，这里明确只处理画布手势 */
+  touch-action: none;
+  user-select: none;
+}
+
+.graph-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* ---- 节点 ---- */
+
+.graph-node {
+  cursor: move;
+}
+
+.node-box {
+  fill: #ffffff;
+  stroke: var(--border);
+  stroke-width: 1;
+  filter: drop-shadow(0 1px 2px rgba(15, 23, 42, 0.08));
+}
+
+.graph-node:hover .node-box {
+  stroke: var(--primary);
+}
+
+.graph-node .node-box {
+  transition: stroke 0.12s ease;
+}
+
+.node-seq {
+  fill: var(--primary-weak);
+}
+
+.node-seq-text {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--primary);
+}
+
+.node-title {
+  font-size: 13px;
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.node-meta {
+  font-size: 11px;
+  fill: var(--muted);
+}
+
+.node-branch-badge {
+  fill: #fff1d6;
+}
+
+.node-branch-text {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--warn);
+}
+
+.node-warn {
+  font-size: 13px;
+  fill: var(--danger);
+}
+
+/* 出线锚点：拖它到另一个节点 = 建分支 */
+.node-anchor {
+  fill: #ffffff;
+  stroke: var(--primary);
+  stroke-width: 2;
+  cursor: crosshair;
+}
+
+.node-anchor:hover {
+  fill: var(--primary);
+}
+
+/* ---- 边 ---- */
+
+.graph-edge {
+  fill: none;
+  stroke-width: 1.6;
+}
+
+.edge-order .graph-edge,
+.graph-edge.edge-order {
+  stroke: #94a3b8;
+}
+
+.graph-edge.edge-default {
+  stroke: #64748b;
+  stroke-dasharray: 6 4;
+}
+
+.graph-edge.edge-end {
+  stroke: #94a3b8;
+  stroke-dasharray: 4 4;
+}
+
+.graph-edge.edge-branch {
+  stroke-width: 1.9;
+  stroke-dasharray: 7 4;
+}
+
+.graph-edge-label text {
+  font-size: 10.5px;
+}
+
+/* 连线中的临时线 */
+.graph-temp-link {
+  stroke: var(--primary);
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+}
+
+/* ---- 起止节点 ---- */
+
+.graph-terminal rect {
+  fill: var(--primary-weak);
+  stroke: var(--primary);
+  stroke-width: 1.4;
+}
+
+.graph-terminal text {
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--primary);
+}
+
+.graph-terminal.graph-end rect {
+  fill: #f1f5f9;
+  stroke: #94a3b8;
+}
+
+.graph-terminal.graph-end text {
+  fill: var(--muted);
+}
+
+/* ---- 侧栏辅助 ---- */
+
+.graph-ops {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.graph-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 26px;
+  height: 0;
+  border-top: 2px solid #94a3b8;
+}
+
+.legend-line.edge-branch {
+  border-top-style: dashed;
+  border-top-color: #2f6fdb;
+}
+
+.legend-line.edge-end {
+  border-top-style: dotted;
+}

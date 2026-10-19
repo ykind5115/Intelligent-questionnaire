@@ -28,6 +28,7 @@ import {
   renderNav,
   toast,
 } from "/common.js";
+import { createNodeGraph } from "/editor-graph.js";
 
 renderNav("editor");
 
@@ -59,7 +60,17 @@ const state = {
    */
   questions: [],
   unreachable: [],
+  /**
+   * 视图模式：list = 列表（逐题检查）/ graph = 节点画布（看跳转关系）。
+   *
+   * 两种视图操作同一份数据（都落到后端的结构接口），
+   * 因此不存在「两边不一致」的问题 —— 只是同一份结构的两种呈现。
+   */
+  viewMode: "list",
 };
+
+/** 节点画布实例（首次切到节点视图时才创建） */
+let graphView = null;
 
 /** 是否可编辑：草稿 + 模板管理员 */
 function canEdit() {
@@ -87,9 +98,23 @@ async function loadStructureDiagnostics() {
   }
 }
 
-/** questionId → 题目（含题型与选项） */
+/** questionId → 题目（含题型与选项，来自预览接口的权威清单） */
 function questionById(id) {
   return state.questions.find((q) => q.id === id);
+}
+
+/**
+ * 从结构里取出题目对象（含 branches / defaultNext 等完整字段）。
+ *
+ * 为什么不用 questionById：预览接口返回的清单是「摘要」，
+ * 不含 branches 明细；而配置分支时必须读到完整规则。
+ */
+function findQuestion(id) {
+  for (const section of state.schema?.sections ?? []) {
+    const q = section.questions.find((x) => x.id === id);
+    if (q) return q;
+  }
+  return null;
 }
 
 /** 题目标题（找不到时退回 id，便于排查） */
@@ -434,9 +459,88 @@ function render() {
   if (title) title.textContent = state.templateName || "问卷编辑器";
 
   renderReadonlyHint();
-  renderCanvas();
+  renderViews();
   renderSidebar();
   renderStats();
+}
+
+/**
+ * 按当前视图渲染。
+ *
+ * 两种视图操作的是同一份数据（都走后端结构接口），
+ * 所以切换视图不需要重新拉取，只是换一种呈现。
+ */
+function renderViews() {
+  const listBox = $("editor-canvas");
+  const graphBox = $("editor-graph");
+  const toGraph = state.viewMode === "graph";
+
+  listBox.hidden = toGraph;
+  graphBox.hidden = !toGraph;
+
+  const toggle = $("view-toggle");
+  if (toggle) {
+    for (const btn of toggle.querySelectorAll("button")) {
+      btn.classList.toggle("active", btn.dataset.view === state.viewMode);
+    }
+  }
+
+  if (toGraph) {
+    ensureGraph();
+    // 画布是懒创建的：第一次切过来时容器刚显示，尺寸才有效
+    graphView.render();
+    graphView.fit();
+  } else {
+    renderCanvas();
+  }
+}
+
+/** 懒创建节点画布实例 */
+function ensureGraph() {
+  if (graphView) return;
+
+  graphView = createNodeGraph({
+    host: $("editor-graph"),
+    getSchema: () => state.schema,
+    getUnreachable: () => state.unreachable,
+    canEdit,
+    onEditQuestion: (id) => {
+      const q = findQuestion(id);
+      if (q) editQuestion(q);
+    },
+    onBranchEdit: (id, prefillGoTo) => openBranchEditor(id, { prefillGoTo }),
+    onToast: toast,
+    saveLayout: saveNodeLayout,
+  });
+}
+
+/**
+ * 保存节点坐标。
+ *
+ * 注意这是**只写 layout 键**的接口（见后端 mergeTemplateVersionLayout），
+ * 因此它不会碰结构、不产生审计，也不会与别人正在做的结构编辑互相覆盖。
+ */
+async function saveNodeLayout(positions) {
+  await api(
+    "PATCH",
+    `/api/v1/questionnaire-templates/${state.templateId}/versions/${state.versionId}/layout`,
+    { positions }
+  );
+
+  // 同步进本地 schema：否则下一次重绘会从 schema.layout 读旧坐标，
+  // 节点看起来「弹回去」（画布内部还有一层本次会话的影子坐标兜底，
+  // 但把它写进 schema 才是根本解）。
+  state.schema.layout = { ...(state.schema.layout ?? {}), ...positions };
+}
+
+/** 切换视图（切换前先把未落盘的坐标存掉） */
+async function switchView(next) {
+  if (next === state.viewMode) return;
+
+  if (graphView) await graphView.flush();
+
+  state.viewMode = next;
+  renderViews();
 }
 
 /** 只读原因提示（非草稿 / 非管理员） */
@@ -691,11 +795,11 @@ function renderQuestionRow(section, q, index, editable) {
     const branchBtn = button(hasBranch(q) ? "改分支" : "设分支", {
       className: "btn-ghost btn-sm",
     });
-    branchBtn.addEventListener("click", () => openBranchEditor(section, q));
+    branchBtn.addEventListener("click", () => openBranchEditor(q.id));
     actions.appendChild(branchBtn);
 
     const edit = button("编辑", { className: "btn-ghost btn-sm" });
-    edit.addEventListener("click", () => editQuestion(section, q));
+    edit.addEventListener("click", () => editQuestion(q));
     actions.appendChild(edit);
 
     const del = button("删除", { className: "btn-ghost danger btn-sm" });
@@ -752,11 +856,53 @@ function renderSidebar() {
   box.appendChild(
     el("p", {
       className: "hint",
-      text: canEdit()
-        ? "拖动左侧的 ⠿ 手柄可以调整分组与题目的顺序；点「编辑」改内容，点「设分支」配条件跳题。"
-        : "当前为只读视图。",
+      text:
+        state.viewMode === "graph"
+          ? canEdit()
+            ? "拖动节点调整位置；按住节点下方的圆点拖到另一个节点，即可为它建一条分支；双击节点编辑内容；滚轮缩放、空白处拖动平移。"
+            : "当前为只读视图。节点位置、顺序边与分支边都可以看，但不能修改。"
+          : canEdit()
+            ? "拖动左侧的 ⠿ 手柄可以调整分组与题目的顺序；点「编辑」改内容，点「设分支」配条件跳题。"
+            : "当前为只读视图。",
     })
   );
+
+  // ---- 节点视图的画布操作 ----
+  if (state.viewMode === "graph") {
+    const ops = el("div", { className: "editor-side-block graph-ops" });
+
+    const fitBtn = button("适配视图", { className: "btn btn-sm" });
+    fitBtn.addEventListener("click", () => graphView?.fit());
+    ops.appendChild(fitBtn);
+
+    if (canEdit()) {
+      const autoBtn = button("重新排布", { className: "btn btn-sm" });
+      autoBtn.addEventListener("click", async () => {
+        if (!window.confirm("按分组与题序重新排列所有节点，会覆盖手动摆的位置。继续？")) {
+          return;
+        }
+        await graphView?.autoLayout();
+        await loadStructureDiagnostics();
+        render();
+      });
+      ops.appendChild(autoBtn);
+    }
+
+    box.appendChild(ops);
+
+    const legend = el("div", { className: "editor-side-block graph-legend" });
+    for (const [cls, label] of [
+      ["edge-order", "顺序（按题序走下一题）"],
+      ["edge-branch", "分支（命中条件才跳）"],
+      ["edge-end", "结束（本题即终点）"],
+    ]) {
+      const row = el("div", { className: "legend-row" });
+      row.appendChild(el("span", { className: `legend-line ${cls}` }));
+      row.appendChild(el("span", { text: label, className: "hint" }));
+      legend.appendChild(row);
+    }
+    box.appendChild(legend);
+  }
 
   if (canEdit()) {
     const addTop = button("+ 添加分组", { className: "btn btn-sm" });
@@ -949,7 +1095,7 @@ async function addQuestion(sectionId) {
   toast("已添加题目");
 }
 
-async function editQuestion(section, q) {
+async function editQuestion(q) {
   const values = await formModal({
     title: "编辑题目",
     initial: {
@@ -1163,7 +1309,22 @@ function makeValueControl(question, op, initial) {
  *   这样「用户在界面上看到的规则」与「存进去的规则」严格一致，
  *   不会出现「删了一条但顺序错了」这类问题。
  */
-function openBranchEditor(section, q) {
+/**
+ * 分支配置弹窗。
+ *
+ * @param {string} questionId 要配置的题目
+ * @param {{prefillGoTo?: string}} options
+ *   prefillGoTo：从画布拖线到某个节点时传入，弹窗会预置一条指向它的规则。
+ *   为什么不直接建一条「默认条件」的规则：条件决定行为，
+ *   猜一个（比如 eq 本题 = 第一项）会让用户以为配好了，
+ *   实际跳转逻辑是错的。宁可多一步，让人明确选条件。
+ */
+function openBranchEditor(questionId, options = {}) {
+  const q = findQuestion(questionId);
+  if (!q) {
+    toast("题目已不存在，请刷新后重试", true);
+    return;
+  }
   const others = state.questions.filter((x) => x.id !== q.id);
 
   if (others.length === 0) {
@@ -1178,6 +1339,16 @@ function openBranchEditor(section, q) {
     value: r.when.value,
     goTo: r.goTo,
   }));
+
+  // 从画布拖线过来时，预置一条指向目标的规则（条件留空，由用户选）
+  if (options.prefillGoTo && !rules.some((r) => r.goTo === options.prefillGoTo)) {
+    rules.push({
+      op: "eq",
+      questionId: q.id,
+      value: undefined,
+      goTo: options.prefillGoTo,
+    });
+  }
   let defaultNext = q.defaultNext;
 
   const backdrop = el("div", { className: "modal-backdrop" });
@@ -1705,6 +1876,21 @@ async function init() {
 
   const newBlankBtn = $("btn-blank");
   if (newBlankBtn) newBlankBtn.addEventListener("click", createBlankTemplate);
+
+  // 视图切换：列表 / 节点
+  const toggle = $("view-toggle");
+  if (toggle) {
+    toggle.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-view]");
+      if (!btn) return;
+      void switchView(btn.dataset.view);
+    });
+  }
+
+  // 离开页面前把没落盘的坐标存掉（防抖可能还没到）
+  window.addEventListener("beforeunload", () => {
+    void graphView?.flush();
+  });
 
   // 没有任何版本 → 提示并引导建空白模板
   if (!state.templateId || !state.versionId) {

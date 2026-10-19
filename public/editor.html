@@ -31,15 +31,24 @@
         <div class="panel-head">
           <h2 id="editor-title">问卷编辑器</h2>
           <div class="panel-head-right">
+            <!-- 视图切换：列表（逐题检查）/ 节点（看跳转关系） -->
+            <div id="view-toggle" class="view-toggle">
+              <button data-view="list" class="active">列表</button>
+              <button data-view="graph">节点</button>
+            </div>
             <span id="editor-status" class="badge">未打开</span>
           </div>
         </div>
 
         <div id="editor-hint" class="editor-banner" hidden></div>
 
+        <!-- 列表视图 -->
         <div id="editor-canvas" class="editor-canvas">
           <p class="hint">载入中…</p>
         </div>
+
+        <!-- 节点视图（默认隐藏，首次切换时初始化） -->
+        <div id="editor-graph" class="editor-graph" hidden></div>
       </section>
 
       <!-- ============ 右：侧栏 ============ -->
