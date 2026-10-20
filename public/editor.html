@@ -16,7 +16,6 @@
           <span>当前用户</span>
           <select id="user-select"></select>
         </label>
-        <button id="btn-blank" class="btn">+ 新建空白模板</button>
         <button id="btn-publish" class="btn btn-primary" hidden>
           发布为正式模板
         </button>
@@ -25,13 +24,45 @@
 
     <div id="toast" class="toast" hidden></div>
 
-    <main class="editor-layout">
-      <!-- ============ 左：结构画布 ============ -->
-      <section class="panel">
+    <!--
+      三栏布局（需求：最左 AI 对话、中间编辑器、最右节点面板）。
+      用固定 + 弹性的混合列宽：两侧面板各自独立滚动，中间画布不被挤压。
+    -->
+    <main class="editor-layout-3">
+      <!-- ============ 左：AI 对话 ============ -->
+      <section class="panel chat-panel">
+        <div class="panel-head">
+          <h2>AI 助手</h2>
+          <span id="chat-status" class="badge">未打开</span>
+        </div>
+
+        <div id="chat-log" class="chat-log">
+          <p class="hint">
+            先新建或加载一个**模板草稿**，然后在这里描述你要做的问卷。<br /><br />
+            例如：「做一个无人机黑飞核查问卷，问是否拥有无人机、有没有飞过、
+            在哪里飞过，还要记录型号」。<br /><br />
+            AI 的改动会直接落到**当前打开的这个草稿版本**上，
+            中间编辑器会同步刷新 —— 你也可以随时手工改。
+          </p>
+        </div>
+
+        <form id="chat-form" class="chat-form">
+          <textarea
+            id="chat-input"
+            rows="3"
+            placeholder="描述你要改什么…（Enter 发送，Shift+Enter 换行）"
+          ></textarea>
+          <button id="chat-send" class="btn btn-primary" type="submit">
+            发送
+          </button>
+        </form>
+      </section>
+
+      <!-- ============ 中：编辑器 ============ -->
+      <section class="panel editor-main">
         <div class="panel-head">
           <h2 id="editor-title">问卷编辑器</h2>
           <div class="panel-head-right">
-            <!-- 视图切换：列表（逐题检查）/ 节点（看跳转关系） -->
             <div id="view-toggle" class="view-toggle">
               <button data-view="list" class="active">列表</button>
               <button data-view="graph">节点</button>
@@ -40,27 +71,43 @@
           </div>
         </div>
 
+        <div class="toolbar editor-toolbar">
+          <button id="btn-new" class="btn btn-sm">+ 新建模板</button>
+          <button id="btn-load" class="btn btn-sm">加载模板</button>
+          <button id="btn-save-draft" class="btn btn-sm">保存为草稿</button>
+        </div>
+
         <div id="editor-hint" class="editor-banner" hidden></div>
 
-        <!-- 列表视图 -->
         <div id="editor-canvas" class="editor-canvas">
           <p class="hint">载入中…</p>
         </div>
 
-        <!-- 节点视图（默认隐藏，首次切换时初始化） -->
         <div id="editor-graph" class="editor-graph" hidden></div>
       </section>
 
-      <!-- ============ 右：侧栏 ============ -->
-      <section class="panel">
+      <!-- ============ 右：节点面板 ============ -->
+      <section class="panel node-panel">
         <div class="panel-head">
-          <h2>操作与统计</h2>
+          <h2>节点</h2>
         </div>
-        <div id="editor-side" class="editor-side"></div>
+        <div id="node-palette" class="node-palette">
+          <p class="hint">载入中…</p>
+        </div>
+
+        <div class="panel-head">
+          <h2>本问卷的节点</h2>
+        </div>
+        <div id="node-outline" class="node-outline">
+          <p class="hint">载入中…</p>
+        </div>
+
         <div class="panel-head">
           <h2>概况</h2>
         </div>
         <div id="editor-stats" class="meta-grid"></div>
+
+        <div id="editor-side" class="editor-side"></div>
       </section>
     </main>
 

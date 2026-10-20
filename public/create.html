@@ -3,80 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>从零创建问卷 · 智能问卷</title>
+    <title>问卷编辑器 · 智能问卷</title>
+    <meta http-equiv="refresh" content="0; url=/editor.html" />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">智能问卷</div>
-      <nav id="nav" class="nav"></nav>
-
-      <div class="topbar-controls">
-        <label class="field">
-          <span>当前用户</span>
-          <select id="user-select"></select>
-        </label>
-        <button id="btn-start" class="btn btn-primary">开始创建新问卷</button>
-        <button id="btn-blank" class="btn">手工从零搭（空白模板）</button>
-      </div>
-    </header>
-
-    <div id="toast" class="toast" hidden></div>
-
+    <!--
+      「从零创建」页已合并进「问卷编辑器」。
+      保留这个文件只是为了让旧链接/书签不 404 —— 直接跳过去。
+    -->
     <main class="layout">
-      <!-- ============ 左：AI 对话 ============ -->
       <section class="panel">
-        <div class="panel-head">
-          <h2>AI 助手</h2>
-          <span id="chat-status" class="badge">未开始</span>
-        </div>
-
-        <div id="chat-log" class="chat-log">
-          <p class="hint">
-            点右上角「开始创建新问卷」，先给这份问卷起个名字，<br />
-            然后直接描述你要调查什么即可。<br /><br />
-            例如：「做一个无人机黑飞核查问卷，要问是否拥有无人机、
-            有没有飞过、在哪里飞过，还要记录无人机型号」<br /><br />
-            生成满意后，点右侧的「保存为模板草稿」定稿，再「发布为正式模板」。
-          </p>
-        </div>
-
-        <form id="chat-form" class="chat-form">
-          <textarea
-            id="chat-input"
-            rows="3"
-            placeholder="描述你要做的问卷…（Enter 发送，Shift+Enter 换行）"
-          ></textarea>
-          <button id="chat-send" class="btn btn-primary" type="submit">发送</button>
-        </form>
-      </section>
-
-      <!-- ============ 右：生成结果 ============ -->
-      <section class="panel">
-        <div class="panel-head">
-          <h2>生成结果</h2>
-          <div class="panel-head-right">
-            <span id="result-status" class="badge">尚未开始</span>
-          </div>
-        </div>
-
-        <div class="toolbar">
-          <button id="btn-refresh" class="btn btn-sm">刷新结构</button>
-          <button id="btn-commit" class="btn btn-sm">保存为模板草稿</button>
-          <button id="btn-publish" class="btn btn-sm btn-primary" disabled>
-            发布为正式模板
-          </button>
-        </div>
-
-        <div id="result-body" class="detail">
-          <p class="hint">
-            开始创建后，这里会显示问卷的名称、结构与状态，
-            以及「保存为模板草稿」「发布为正式模板」两个动作。
-          </p>
-        </div>
+        <div class="panel-head"><h2>页面已合并</h2></div>
+        <p class="hint">
+          「从零创建」已合并进
+          <a href="/editor.html">问卷编辑器</a>：
+          左侧是 AI 对话、中间是编辑器、右侧是节点面板。
+          正在跳转…
+        </p>
       </section>
     </main>
-
-    <script type="module" src="/create.js"></script>
+    <script>
+      location.replace("/editor.html" + location.search);
+    </script>
   </body>
 </html>

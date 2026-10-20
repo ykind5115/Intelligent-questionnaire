@@ -29,6 +29,7 @@ import {
   toast,
 } from "/common.js";
 import { createNodeGraph } from "/editor-graph.js";
+import { createChatPanel } from "/editor-ai.js";
 
 renderNav("editor");
 
@@ -71,6 +72,9 @@ const state = {
 
 /** 节点画布实例（首次切到节点视图时才创建） */
 let graphView = null;
+
+/** 左侧 AI 对话面板实例 */
+let chatPanel = null;
 
 /** 是否可编辑：草稿 + 模板管理员 */
 function canEdit() {
@@ -462,6 +466,8 @@ function render() {
   renderViews();
   renderSidebar();
   renderStats();
+  renderNodePanel();
+  chatPanel?.render();
 }
 
 /**
@@ -1052,10 +1058,12 @@ async function removeSection(section) {
   toast("已删除分组");
 }
 
-async function addQuestion(sectionId) {
+async function addQuestion(sectionId, defaultType) {
   const values = await formModal({
     title: "添加题目",
     okText: "添加",
+    // 从右侧节点面板点题型进来时，把题型预选好，少一步操作
+    ...(defaultType ? { initial: { type: defaultType } } : {}),
     spec: [
       { key: "title", label: "题干", type: "text", placeholder: "例如：是否拥有无人机？" },
       {
@@ -2261,6 +2269,377 @@ async function createBlankTemplate() {
 // 初始化
 // ============================================================
 
+// ============================================================
+// 模板：新建 / 加载 / 保存为草稿
+// ============================================================
+
+/**
+ * 给一个模板挑要打开的版本。
+ *
+ * 优先**最新的草稿**（可编辑）；没有草稿则打开最新版本（只读，
+ * 顶部横幅会给出「基于它新建草稿版本」）。
+ * 为什么不自动建草稿：那会在用户只是「看一眼」时凭空多出一个版本。
+ */
+async function resolveVersionForTemplate(templateId) {
+  const res = await api(
+    "GET",
+    `/api/v1/questionnaire-templates/${templateId}/versions`
+  );
+  const versions = res.items ?? [];
+  if (versions.length === 0) return null;
+
+  const drafts = versions.filter((v) => v.status === "draft");
+  const pool = drafts.length > 0 ? drafts : versions;
+  return [...pool].sort((a, b) => (b.versionNo ?? 0) - (a.versionNo ?? 0))[0].id;
+}
+
+/** 打开指定模板（自动挑版本后跳转，保持 URL 可分享/可刷新） */
+async function openTemplate(templateId) {
+  try {
+    const versionId = await resolveVersionForTemplate(templateId);
+    if (!versionId) {
+      toast("这个模板还没有任何版本", true);
+      return;
+    }
+    location.href =
+      `/editor.html?templateId=${encodeURIComponent(templateId)}` +
+      `&versionId=${encodeURIComponent(versionId)}`;
+  } catch (e) {
+    toast(`加载失败：${e.message}`, true);
+  }
+}
+
+/**
+ * 「加载模板」弹窗。
+ *
+ * 为什么是「先列出模板、再打开」而不是一张「模板 × 版本」的大表：
+ *   模板可能有几十个，一次把所有版本都查出来既慢又难读；
+ *   而打开时自动挑「最新草稿」几乎总是用户想要的。
+ *   要看某个特定版本，仍可从「模板管理」页点进去。
+ */
+function openLoadTemplateModal() {
+  const backdrop = el("div", { className: "modal-backdrop" });
+  const modal = el("div", { className: "modal" });
+
+  const head = el("div", { className: "modal-head" });
+  head.appendChild(el("h3", { text: "加载模板" }));
+  modal.appendChild(head);
+
+  const body = el("div", { className: "modal-body" });
+
+  const search = textInput("", "搜索模板名称");
+  body.appendChild(field("搜索", search));
+  body.appendChild(
+    el("p", {
+      className: "hint",
+      text: "打开时会自动选「最新的草稿版本」；没有草稿就打开最新版本（只读）。",
+    })
+  );
+
+  const listBox = el("div", { className: "load-list" });
+  body.appendChild(listBox);
+  modal.appendChild(body);
+
+  const footer = el("div", { className: "modal-foot" });
+  const cancel = button("关闭");
+  footer.appendChild(cancel);
+  modal.appendChild(footer);
+
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+
+  const close = () => backdrop.remove();
+  cancel.addEventListener("click", close);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close();
+  });
+
+  let timer = null;
+
+  async function loadTemplates() {
+    clear(listBox);
+    listBox.appendChild(el("p", { className: "hint", text: "加载中…" }));
+
+    try {
+      const params = new URLSearchParams({ pageSize: "50" });
+      const keyword = search.value.trim();
+      if (keyword) params.set("keyword", keyword);
+
+      const data = await api(
+        "GET",
+        `/api/v1/questionnaire-templates?${params.toString()}`
+      );
+      const items = data.items ?? [];
+
+      clear(listBox);
+      if (items.length === 0) {
+        listBox.appendChild(
+          el("p", {
+            className: "hint",
+            text: keyword ? `没有匹配「${keyword}」的模板` : "还没有任何模板",
+          })
+        );
+        return;
+      }
+
+      for (const t of items) {
+        const row = el("div", { className: "load-row" });
+
+        const main = el("div", { className: "load-row-main" });
+        main.appendChild(el("div", { className: "load-row-title", text: t.name }));
+
+        const meta = el("div", { className: "load-row-meta" });
+        meta.appendChild(
+          el("span", {
+            className:
+              t.status === "published" ? "badge ok" : "badge warn",
+            text:
+              t.status === "published"
+                ? "已发布"
+                : t.status === "disabled"
+                  ? "已停用"
+                  : "草稿",
+          })
+        );
+        if (t.versionCount !== undefined) {
+          meta.appendChild(el("span", { className: "hint", text: `共 ${t.versionCount} 个版本` }));
+        }
+        if (t.description) {
+          meta.appendChild(el("span", { className: "hint", text: t.description }));
+        }
+        main.appendChild(meta);
+
+        row.appendChild(main);
+
+        const open = button("打开", { className: "btn btn-sm btn-primary" });
+        open.addEventListener("click", () => {
+          close();
+          void openTemplate(t.id);
+        });
+        row.appendChild(open);
+
+        listBox.appendChild(row);
+      }
+    } catch (e) {
+      clear(listBox);
+      listBox.appendChild(
+        el("p", { className: "hint", text: `加载失败：${e.message}` })
+      );
+    }
+  }
+
+  search.addEventListener("input", () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => void loadTemplates(), 300);
+  });
+
+  void loadTemplates();
+}
+
+/**
+ * 「保存为草稿」。
+ *
+ * 说明一件容易误解的事：**题目内容本来就是改一次存一次**（每个操作都直接落库），
+ * 所以这里并不是「把内容写进去」，而是把这个草稿**定稿**：
+ * 校验结构非空、确认名称与说明、写变更说明。
+ *
+ * 后端复用 `templateService.commitDraftVersion`（原本只由 AI 的 commit 调用），
+ * 现在有了独立入口，手工编辑也能走同一套规则。
+ */
+async function saveAsDraft() {
+  if (!state.templateId || !state.versionId) {
+    toast("先新建或加载一个模板", true);
+    return;
+  }
+  if (!canEdit()) {
+    toast(
+      state.versionStatus !== "draft"
+        ? "只有草稿版本能保存为草稿。发布后请「基于它新建草稿版本」。"
+        : "保存模板需要「模板管理员」账号",
+      true
+    );
+    return;
+  }
+
+  const values = await formModal({
+    title: "保存为草稿",
+    okText: "保存",
+    initial: {
+      name: state.templateName ?? "",
+      description: state.schema?.description ?? "",
+      changeNote: "",
+    },
+    spec: [
+      { key: "name", label: "模板名称", type: "text", placeholder: "例如：无人机黑飞核查问卷" },
+      {
+        key: "description",
+        label: "模板说明（可留空）",
+        type: "textarea",
+        rows: 2,
+      },
+      {
+        key: "changeNote",
+        label: "本次变更说明（可留空）",
+        type: "text",
+        placeholder: "例如：新增分支机构",
+      },
+    ],
+  });
+
+  if (!values || !values.name) return;
+
+  try {
+    await api(
+      "POST",
+      `/api/v1/questionnaire-templates/${state.templateId}/versions/${state.versionId}/save-draft`,
+      {
+        name: values.name,
+        ...(values.description ? { description: values.description } : {}),
+        ...(values.changeNote ? { changeNote: values.changeNote } : {}),
+      }
+    );
+    toast(`已保存为草稿 v${state.versionNo}`);
+    await loadAll();
+  } catch (e) {
+    if (e.code === "VALIDATION_ERROR") {
+      toast("问卷还是空的：至少要有 1 个分组和 1 道题才能保存为草稿", true);
+    } else {
+      toast(`保存失败：${e.message}`, true);
+    }
+  }
+}
+
+// ============================================================
+// 右栏：节点面板（可添加的节点类型 + 本问卷的节点）
+// ============================================================
+
+/** 把某个节点定位到视野里（列表视图滚动 + 高亮；节点视图切回列表） */
+function focusQuestion(questionId) {
+  if (state.viewMode !== "list") {
+    state.viewMode = "list";
+    renderViews();
+  }
+  const node = document.querySelector(`[data-question-id="${questionId}"]`);
+  if (!node) return;
+  node.scrollIntoView({ behavior: "smooth", block: "center" });
+  node.classList.add("q-card-flash");
+  setTimeout(() => node.classList.remove("q-card-flash"), 1600);
+}
+
+/** 最后一个分组（新题默认加到这里） */
+function lastSection() {
+  const sections = state.schema?.sections ?? [];
+  if (sections.length === 0) return null;
+  return [...sections].sort((a, b) => a.order - b.order)[sections.length - 1];
+}
+
+/** 从节点面板添加一道题 */
+async function addQuestionFromPalette(type) {
+  const section = lastSection();
+  if (!section) {
+    toast("还没有分组，先添加一个分组", true);
+    return;
+  }
+  await addQuestion(section.id, type);
+}
+
+function renderNodePanel() {
+  const palette = $("node-palette");
+  const outline = $("node-outline");
+  if (!palette || !outline) return;
+
+  clear(palette);
+  clear(outline);
+
+  const editable = canEdit();
+
+  // ---- 可添加的节点类型 ----
+  const secBtn = button("+ 分组", { className: "btn btn-sm" });
+  secBtn.disabled = !editable;
+  secBtn.addEventListener("click", addSection);
+  palette.appendChild(secBtn);
+
+  const grid = el("div", { className: "palette-grid" });
+  for (const [type, label] of Object.entries(QUESTION_TYPE_LABEL)) {
+    const b = button(label, { className: "btn btn-sm palette-btn" });
+    b.disabled = !editable;
+    b.title = `在最后一个分组里添加一道「${label}」题`;
+    b.addEventListener("click", () => void addQuestionFromPalette(type));
+    grid.appendChild(b);
+  }
+  palette.appendChild(grid);
+
+  if (!editable) {
+    palette.appendChild(
+      el("p", { className: "hint", text: "当前为只读视图，不能添加节点。" })
+    );
+  }
+
+  // ---- 本问卷的节点 ----
+  const sections = state.schema?.sections ?? [];
+  if (sections.length === 0) {
+    outline.appendChild(
+      el("p", { className: "hint", text: "还没有节点。用上面的按钮添加分组与题目。" })
+    );
+    return;
+  }
+
+  const ordered = [...sections].sort((a, b) => a.order - b.order);
+  ordered.forEach((section, si) => {
+    const block = el("div", { className: "outline-section" });
+    block.appendChild(
+      el("div", {
+        className: "outline-title",
+        text: `${si + 1}. ${section.title}`,
+      })
+    );
+
+    const questions = [...(section.questions ?? [])].sort(
+      (a, b) => a.order - b.order
+    );
+    if (questions.length === 0) {
+      block.appendChild(el("p", { className: "hint", text: "（空分组）" }));
+    }
+
+    questions.forEach((q, qi) => {
+      const row = el("div", { className: "outline-item" });
+      row.appendChild(
+        el("span", { className: "outline-index", text: `${si + 1}.${qi + 1}` })
+      );
+      row.appendChild(
+        el("span", {
+          className: "outline-label",
+          text: q.title || "（无题干）",
+        })
+      );
+      if (q.branches?.length) {
+        row.appendChild(
+          el("span", { className: "outline-branch", text: `⇢${q.branches.length}` })
+        );
+      }
+      const unreachable = state.unreachable.includes(q.id);
+      if (unreachable) {
+        row.appendChild(el("span", { className: "outline-warn", text: "⚠" }));
+      }
+      row.addEventListener("click", () => focusQuestion(q.id));
+      block.appendChild(row);
+    });
+
+    outline.appendChild(block);
+  });
+}
+
+/**
+ * 页面初始化。
+ *
+ * 页面已合并：左侧 AI 对话、中间编辑器、右侧节点面板，
+ * 三者围绕**同一个草稿版本**工作。
+ *
+ * 进入方式（URL 参数）：
+ *   /editor.html                          空白状态，可新建 / 加载
+ *   /editor.html?templateId=X             自动挑该模板最新的草稿版本
+ *   /editor.html?templateId=X&versionId=Y 直接打开指定版本
+ */
 async function init() {
   const params = new URLSearchParams(location.search);
   state.templateId = params.get("templateId");
@@ -2270,16 +2649,38 @@ async function init() {
   state.isAdmin = picker.hasRole("template_admin");
   picker.onChange(async () => {
     state.isAdmin = picker.hasRole("template_admin");
+    // 会话归属于创建它的用户：换账号必须重新绑定，
+    // 否则继续发消息会 403（访问他人会话），现象是「换了用户就发不出去」
+    chatPanel?.reset();
     render();
   });
 
+  // ---- 左侧 AI 面板 ----
+  chatPanel = createChatPanel({
+    getVersionId: () =>
+      state.versionStatus === "draft" ? state.versionId : null,
+    canEdit,
+    // AI 改完之后，编辑器要跟着刷新（它改的是同一个版本）
+    onStructureChanged: async () => {
+      await refreshAfterWrite();
+    },
+  });
+  chatPanel.init();
+
+  // ---- 工具栏 ----
   const publishBtn = $("btn-publish");
   if (publishBtn) publishBtn.addEventListener("click", publishCurrent);
 
-  const newBlankBtn = $("btn-blank");
-  if (newBlankBtn) newBlankBtn.addEventListener("click", createBlankTemplate);
+  const newBtn = $("btn-new");
+  if (newBtn) newBtn.addEventListener("click", createBlankTemplate);
 
-  // 视图切换：列表 / 节点
+  const loadBtn = $("btn-load");
+  if (loadBtn) loadBtn.addEventListener("click", openLoadTemplateModal);
+
+  const saveDraftBtn = $("btn-save-draft");
+  if (saveDraftBtn) saveDraftBtn.addEventListener("click", saveAsDraft);
+
+  // ---- 视图切换：列表 / 节点 ----
   const toggle = $("view-toggle");
   if (toggle) {
     toggle.addEventListener("click", (e) => {
@@ -2294,7 +2695,24 @@ async function init() {
     void graphView?.flush();
   });
 
-  // 没有任何版本 → 提示并引导建空白模板
+  // ---- 只给了模板、没给版本：自动挑一个 ----
+  // （「模板管理」页的链接就是只带 templateId，原先这里会直接显示空白，
+  //   用户以为打不开 —— 现在自动选最新草稿，没有草稿则选最新版本只读。）
+  if (state.templateId && !state.versionId) {
+    try {
+      state.versionId = await resolveVersionForTemplate(state.templateId);
+      if (state.versionId) {
+        // 把版本补进 URL：刷新 / 分享时能回到同一处
+        const url = new URL(location.href);
+        url.searchParams.set("versionId", state.versionId);
+        history.replaceState(null, "", url.toString());
+      }
+    } catch (e) {
+      toast(`自动选择版本失败：${e.message}`, true);
+    }
+  }
+
+  // ---- 什么都没打开：引导新建或加载 ----
   if (!state.templateId || !state.versionId) {
     const canvas = $("editor-canvas");
     clear(canvas);
@@ -2302,14 +2720,23 @@ async function init() {
     empty.appendChild(
       el("p", {
         text:
-          "还没有打开任何问卷。可以新建一份空白模板，或从「模板管理」页选一个版本进来。",
+          "还没有打开任何问卷。可以先新建一份模板，或加载一个已有模板" +
+          "（有草稿就打开草稿，没有就打开最新版本）。",
       })
     );
+
+    const row = el("div", { className: "editor-empty-actions" });
     if (state.isAdmin) {
-      const go = button("+ 新建空白模板", { className: "btn btn-primary" });
+      const go = button("+ 新建模板", { className: "btn btn-primary" });
       go.addEventListener("click", createBlankTemplate);
-      empty.appendChild(go);
-    } else {
+      row.appendChild(go);
+    }
+    const load = button("加载已有模板", { className: "btn" });
+    load.addEventListener("click", openLoadTemplateModal);
+    row.appendChild(load);
+    empty.appendChild(row);
+
+    if (!state.isAdmin) {
       empty.appendChild(
         el("p", {
           className: "hint",
@@ -2317,8 +2744,11 @@ async function init() {
         })
       );
     }
+
     canvas.appendChild(empty);
     renderSidebar();
+    renderNodePanel();
+    chatPanel.render();
     return;
   }
 

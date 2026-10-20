@@ -274,7 +274,7 @@ export async function initUserPicker(preferredUsername) {
 export const NAV_ITEMS = [
   { href: "/", label: "下发问卷", key: "dispatch" },
   { href: "/instances.html", label: "案件管理", key: "instances" },
-  { href: "/create.html", label: "从零创建", key: "create" },
+
   { href: "/editor.html", label: "问卷编辑器", key: "editor" },
   { href: "/templates.html", label: "模板管理", key: "templates" },
 ];
