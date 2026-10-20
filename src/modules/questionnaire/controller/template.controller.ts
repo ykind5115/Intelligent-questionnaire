@@ -17,6 +17,8 @@ import { validate, validatedQuery } from "../../../app/validate.js";
 import { serviceContextOf } from "../../../app/request-context.js";
 import { questionnaireSchema } from "../../questionnaire/schema/questionnaire.schema.js";
 import { templateService } from "../../questionnaire/service/template.service.js";
+import { questionnaireService } from "../../questionnaire/service/questionnaire.service.js";
+import { invalidParameter } from "../../../shared/errors/index.js";
 import { createTemplateEditorRouter, createFlowPreviewRouter } from "./editor.controller.js";
 // ============================================================
 // 请求 Schema
@@ -79,6 +81,17 @@ const versionParams = z.object({
  * schema 用 questionnaireSchema 校验 ——
  * 这样在 API 边界就把非法问卷挡住，而不是等落库后才发现。
  */
+/**
+ * 保存为草稿的请求体。
+ *
+ * 三个字段都可选 —— 只改名称、或只写变更说明都合理。
+ * 但结构是否非空由 Service 校验（空问卷不允许定稿），这里不做重复检查。
+ */
+const saveDraftBody = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
+  description: z.string().max(2000).optional(),
+  changeNote: z.string().max(2000).optional(),
+});
 const createVersionBody = z.object({
   schema: questionnaireSchema.optional(),
   changeNote: z.string().max(2000).optional(),
@@ -330,6 +343,49 @@ export function createTemplateRouter(): Router {
         serviceContextOf(req)
       );
       sendSuccess(req, res, toVersionSummaryDto(version));
+    })
+  );
+
+  /**
+   * ---- 保存为草稿（定稿）----
+   *
+   * 为什么需要独立入口：`commitDraftVersion` 原先只被 AI 的
+   * `POST /ai/conversations/:id/commit` 调用，于是**纯手工编辑的模板没有任何
+   * 定稿动作** —— 内容其实每次操作都已落库，但用户没有「确认名称/写变更说明」
+   * 的地方，也拿不到「结构非空」这道校验。
+   *
+   * 语义与 AI commit 完全相同（复用同一个 Service 方法），差别只是不绑定会话。
+   */
+  router.post(
+    "/:templateId/versions/:versionId/save-draft",
+    validate({ params: versionParams, body: saveDraftBody }),
+    asyncHandler(async (req: Request, res: Response) => {
+      const { templateId, versionId } = req.params as z.infer<
+        typeof versionParams
+      >;
+      const body = req.body as z.infer<typeof saveDraftBody>;
+      const ctx = serviceContextOf(req);
+
+      // commitDraftVersion 只按 versionId 工作，因此这里先确认版本属于该模板，
+      // 避免拿 A 模板的 id 去定稿 B 模板的版本（URL 与内容不一致）
+      const version = await questionnaireService.getTemplateVersionForEditing(
+        versionId,
+        ctx
+      );
+      if (version.templateId !== templateId) {
+        throw invalidParameter("版本不属于该模板", {
+          path: "versionId",
+          versionId,
+          templateId,
+        });
+      }
+
+      const saved = await templateService.commitDraftVersion(
+        versionId,
+        body,
+        ctx
+      );
+      sendSuccess(req, res, saved);
     })
   );
 
