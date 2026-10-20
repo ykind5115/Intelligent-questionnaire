@@ -1018,6 +1018,43 @@ export function createNodeGraph(opts) {
       applyView();
     },
 
+    /**
+     * 整齐重排：**单列、等距、从上到下**。
+     *
+     * 与 autoLayout 的区别：
+     *   autoLayout 按「分组 = 一列」排（横向铺开，便于看分组）；
+     *   tidyLayout 按「一条竖线排到底」（每个节点之间距离相同），
+     *   适合「先把图刷新成规规矩矩的样子，再逐个调」。
+     *
+     * 会覆盖手动摆过的位置 —— 这正是「刷新」按钮的语义，因此调用方要先确认。
+     */
+    async tidyLayout() {
+      const schema = opts.getSchema();
+      if (!schema) return;
+
+      // 用「清空 layout」后的模型拿题目顺序；坐标按索引等距生成
+      const model = buildModel({ ...schema, layout: {} }, new Map());
+      const gap = ROW_GAP;
+      const positions = {};
+
+      model.order.forEach((id, i) => {
+        positions[id] = { x: PAD, y: PAD + i * (NODE_H + gap) };
+      });
+
+      // 「结束」节点放在最后一行下面，水平居中于节点列
+      positions[END_NODE_KEY] = {
+        x: PAD + Math.round((NODE_W - 96) / 2),
+        y: PAD + model.order.length * (NODE_H + gap) + Math.round(gap / 2),
+      };
+
+      await opts.saveLayout(positions);
+      for (const [id, p] of Object.entries(positions)) live.set(id, p);
+
+      opts.onToast?.("已刷新并重排为自上而下");
+      render();
+      fitTo(buildModel(opts.getSchema(), live));
+    },
+
     /** 重新排布：按自动布局算一遍并整体保存 */
     async autoLayout() {
       const schema = opts.getSchema();

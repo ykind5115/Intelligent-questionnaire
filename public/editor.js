@@ -67,6 +67,14 @@ let graphView = null;
 /** 左侧 AI 对话面板实例 */
 let chatPanel = null;
 
+/**
+ * 是否已经自动适配过视野。
+ *
+ * 只适配一次：之后的重绘（保存、AI 改动、切题）都保持用户当前的缩放与平移，
+ * 否则每次保存都会「跳回全貌」。
+ */
+let fittedOnce = false;
+
 /** 是否可编辑：草稿 + 模板管理员 */
 function canEdit() {
   return state.versionStatus === "draft" && state.isAdmin;
@@ -485,7 +493,16 @@ function renderViews() {
   ensureGraph();
   // 画布是懒创建的：第一次渲染时容器刚可见，尺寸才有效
   graphView.render();
-  graphView.fit();
+
+  // 只在**首次**渲染时自动适配视野。
+  //
+  // 之前每次渲染都 fit：于是双击节点改完并保存后，图会突然缩回全貌，
+  // 用户刚放大的视野就丢了（而「取消」反而不动视野，两者体验不一致）。
+  // 现在除首次外一律保持当前平移/缩放；需要重新适配时点「刷新」。
+  if (!fittedOnce) {
+    graphView.fit();
+    fittedOnce = true;
+  }
 }
 
 /** 未打开任何问卷时的引导（占满中间面板） */
@@ -537,7 +554,7 @@ function ensureGraph() {
       const q = findQuestion(id);
       if (q) editQuestion(q);
     },
-    onBranchEdit: (id, prefillGoTo) => openBranchEditor(id, { prefillGoTo }),
+    // 拖线不再直接当分支：先问「是调顺序、无条件跳、还是条件分支」\n    onBranchEdit: (fromId, toId) => openConnectDialog(fromId, toId),
     onEdgeClick: (edge) => openEdgeEditor(edge),
     onToast: toast,
     saveLayout: saveNodeLayout,
@@ -2509,6 +2526,236 @@ async function moveQuestionToSection(q) {
   });
 }
 
+// ============================================================
+// 刷新：重新载入 + 重排为自上而下
+// ============================================================
+
+/**
+ * 「刷新」按钮。
+ *
+ * 语义（与需求方确认过的两点）：
+ *   1. 重新拉一次当前版本的结构（实时状态，可能刚被 AI 或别人改过）；
+ *   2. 把节点重排成**单列、从上到下、等距**。
+ *
+ * 第 2 点会覆盖手动摆的位置，所以先确认一次 —— 它是「把图摆整齐」，
+ * 不是「保留我摆的样子」。
+ */
+async function refreshGraph() {
+  if (!state.templateId || !state.versionId) {
+    toast("先新建或加载一个模板", true);
+    return;
+  }
+
+  const ok = window.confirm(
+    "刷新会重新载入结构，并把所有节点重排成自上而下的单列（会覆盖手动摆的位置）。继续？"
+  );
+  if (!ok) return;
+
+  await graphView?.flush();
+  await refreshAfterWrite();
+
+  if (graphView) {
+    await graphView.tidyLayout();
+    await loadStructureDiagnostics();
+    render();
+  }
+}
+
+// ============================================================
+// 拖线连接：先问「这是哪种关系」
+// ============================================================
+
+/** 题目属于哪个分组 */
+function sectionOfQuestion(questionId) {
+  for (const section of state.schema?.sections ?? []) {
+    if ((section.questions ?? []).some((q) => q.id === questionId)) return section;
+  }
+  return null;
+}
+
+/** 题目在展平顺序里的位置 */
+function flatIndex(questionId) {
+  return state.questions.findIndex((q) => q.id === questionId);
+}
+
+/**
+ * 把某道题移到锚点题的前 / 后（同组走 reorder，跨组走 move）。
+ *
+ * 这是「调整自然顺序」的唯一手段：本模型里**顺序由 order 决定**，
+ * 边只表达「跳过」。因此「让 A 成为 B 的父节点」= 调顺序，不是连边。
+ */
+async function reorderMove(moveId, anchorId, place) {
+  const moveSection = sectionOfQuestion(moveId);
+  const anchorSection = sectionOfQuestion(anchorId);
+  const anchorQ = findQuestion(anchorId);
+  if (!moveSection || !anchorSection || !anchorQ) return;
+
+  if (moveSection.id === anchorSection.id) {
+    const ids = [...anchorSection.questions]
+      .sort((a, b) => a.order - b.order)
+      .map((q) => q.id)
+      .filter((id) => id !== moveId);
+
+    const at = ids.indexOf(anchorId);
+    ids.splice(place === "before" ? at : at + 1, 0, moveId);
+
+    await callApi("PATCH", "/questions/reorder", {
+      sectionId: anchorSection.id,
+      questionIds: ids,
+    });
+    return;
+  }
+
+  await callApi("PATCH", `/questions/${encodeURIComponent(moveId)}/move`, {
+    targetSectionId: anchorSection.id,
+    targetOrder: place === "before" ? anchorQ.order : anchorQ.order + 1,
+  });
+}
+
+/**
+ * 从节点锚点拖到另一个节点之后，弹出的「连接方式」对话框。
+ *
+ * 为什么要先问：同一条线在数据模型里对应三种完全不同的东西，
+ *   - **调整顺序**：让目标成为源的自然下一题（隐含的自动连线）；
+ *   - **无条件跳转**：答完源题就跳到目标题，跳过中间那些题；
+ *   - **条件分支**：满足条件才跳。
+ * 此前拖线一律当成「条件分支」，于是「只想让两题挨着」的人
+ * 会莫名其妙得到一个必须配条件的跳转 —— 这正是需求方遇到的困惑。
+ *
+ * 方向约束：只能向后连（否则成环），于是
+ *   目标在**上方**时只提供「调整顺序」（把源移到目标前面）；
+ *   目标在**下方**时三种都可选。
+ */
+function openConnectDialog(fromId, toId) {
+  const fromQ = findQuestion(fromId);
+  const toQ = findQuestion(toId);
+  if (!fromQ || !toQ) {
+    toast("题目已不存在，请刷新", true);
+    return;
+  }
+
+  const fromIdx = flatIndex(fromId);
+  const toIdx = flatIndex(toId);
+  const forward = toIdx > fromIdx;
+  const adjacent = toIdx === fromIdx + 1;
+
+  const backdrop = el("div", { className: "modal-backdrop" });
+  const modal = el("div", { className: "modal" });
+
+  const head = el("div", { className: "modal-head" });
+  head.appendChild(el("h3", { text: `连接：${fromQ.title} → ${toQ.title}` }));
+  modal.appendChild(head);
+
+  const body = el("div", { className: "modal-body" });
+
+  body.appendChild(
+    el("p", {
+      className: "hint",
+      text:
+        "「顺序」与「跳转」是两件不同的事：\n" +
+        "· 顺序由题目在清单里的位置决定 —— 相邻两题之间自动就有一条顺序线；\n" +
+        "· 跳转（分支）只在满足条件时才走，是可以跳过中间题目的额外连线。\n" +
+        "所以「让 A 成为 B 的上一题」= 调整顺序，不是连一条分支。",
+    })
+  );
+
+  const close = () => backdrop.remove();
+
+  // ---- 选项 1：调整顺序 ----
+  const orderBox = el("div", { className: "connect-option" });
+  const orderTitle = forward
+    ? `把「${toQ.title}」移到「${fromQ.title}」后面`
+    : `把「${fromQ.title}」移到「${toQ.title}」前面`;
+  orderBox.appendChild(el("div", { className: "connect-option-title", text: orderTitle }));
+  orderBox.appendChild(
+    el("p", {
+      className: "hint",
+      text: "改的是题目顺序，之后两题之间自然就会有一条顺序线，不需要额外配置条件。",
+    })
+  );
+  const orderBtn = button("调整顺序", { className: "btn btn-sm btn-primary" });
+  orderBtn.addEventListener("click", async () => {
+    close();
+    if (forward) await reorderMove(toId, fromId, "after");
+    else await reorderMove(fromId, toId, "before");
+  });
+  orderBox.appendChild(orderBtn);
+  body.appendChild(orderBox);
+
+  // ---- 选项 2：无条件跳转（仅向后、且不相邻时有意义）----
+  if (forward && !adjacent) {
+    const jumpBox = el("div", { className: "connect-option" });
+    jumpBox.appendChild(
+      el("div", { className: "connect-option-title", text: "答完本题直接跳到目标题" })
+    );
+    jumpBox.appendChild(
+      el("p", {
+        className: "hint",
+        text: "无条件的跳转：中间的题目会被跳过。这仍然是「跳转」而不是「顺序」。",
+      })
+    );
+    const jumpBtn = button("无条件跳到该题", { className: "btn btn-sm" });
+    jumpBtn.addEventListener("click", async () => {
+      close();
+      const data = await writeBranchConfig(
+        fromId,
+        fromQ.branches ?? [],
+        toId
+      );
+      if (data !== null) toast("已设为无条件跳转");
+    });
+    jumpBox.appendChild(jumpBtn);
+    body.appendChild(jumpBox);
+  }
+
+  // ---- 选项 3：条件分支（仅向后）----
+  if (forward) {
+    const branchBox = el("div", { className: "connect-option" });
+    branchBox.appendChild(
+      el("div", { className: "connect-option-title", text: "满足条件时才跳到目标题" })
+    );
+    branchBox.appendChild(
+      el("p", {
+        className: "hint",
+        text: "这就是「分支」：需要指定条件（例如某题等于某个选项）。",
+      })
+    );
+    const branchBtn = button("配置条件分支", { className: "btn btn-sm" });
+    branchBtn.addEventListener("click", () => {
+      close();
+      openBranchEditor(fromId, { prefillGoTo: toId });
+    });
+    branchBox.appendChild(branchBtn);
+    body.appendChild(branchBox);
+  }
+
+  // 目标在上方时，说明为什么不能连跳转
+  if (!forward) {
+    body.appendChild(
+      el("p", {
+        className: "hint",
+        text:
+          "目标在本题之前，不能建立跳转（往前跳会成环）。" +
+          "如果只是想让两题相邻，用上面的「调整顺序」。",
+      })
+    );
+  }
+
+  modal.appendChild(body);
+
+  const foot = el("div", { className: "modal-foot" });
+  const cancel = button("取消");
+  cancel.addEventListener("click", close);
+  foot.appendChild(cancel);
+  modal.appendChild(foot);
+
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) close();
+  });
+}
+
 async function init() {
   const params = new URLSearchParams(location.search);
   state.templateId = params.get("templateId");
@@ -2548,6 +2795,9 @@ async function init() {
 
   const saveDraftBtn = $("btn-save-draft");
   if (saveDraftBtn) saveDraftBtn.addEventListener("click", saveAsDraft);
+
+  const refreshBtn = $("btn-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", refreshGraph);
 
   // 离开页面前把没落盘的坐标存掉（防抖可能还没到）
   window.addEventListener("beforeunload", () => {
