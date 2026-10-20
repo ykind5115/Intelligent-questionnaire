@@ -6,7 +6,8 @@
     <title>问卷编辑器 · 智能问卷</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
-  <body>
+  <!-- page-editor：本页整体按 70% 缩放（见 app.css），字号与间距一起缩小 -->
+  <body class="page-editor">
     <header class="topbar">
       <div class="brand">智能问卷</div>
       <nav id="nav" class="nav"></nav>
@@ -25,8 +26,8 @@
     <div id="toast" class="toast" hidden></div>
 
     <!--
-      三栏布局（需求：最左 AI 对话、中间编辑器、最右节点面板）。
-      用固定 + 弹性的混合列宽：两侧面板各自独立滚动，中间画布不被挤压。
+      三栏布局：最左 AI 对话、中间**只放节点图**、最右节点面板。
+      列表信息已压缩进右栏的「本问卷结构」清单里。
     -->
     <main class="editor-layout-3">
       <!-- ============ 左：AI 对话 ============ -->
@@ -42,7 +43,7 @@
             例如：「做一个无人机黑飞核查问卷，问是否拥有无人机、有没有飞过、
             在哪里飞过，还要记录型号」。<br /><br />
             AI 的改动会直接落到**当前打开的这个草稿版本**上，
-            中间编辑器会同步刷新 —— 你也可以随时手工改。
+            中间的节点图会同步刷新 —— 你也可以随时手工改。
           </p>
         </div>
 
@@ -58,15 +59,11 @@
         </form>
       </section>
 
-      <!-- ============ 中：编辑器 ============ -->
+      <!-- ============ 中：节点图（唯一视图） ============ -->
       <section class="panel editor-main">
         <div class="panel-head">
           <h2 id="editor-title">问卷编辑器</h2>
           <div class="panel-head-right">
-            <div id="view-toggle" class="view-toggle">
-              <button data-view="list" class="active">列表</button>
-              <button data-view="graph">节点</button>
-            </div>
             <span id="editor-status" class="badge">未打开</span>
           </div>
         </div>
@@ -79,11 +76,7 @@
 
         <div id="editor-hint" class="editor-banner" hidden></div>
 
-        <div id="editor-canvas" class="editor-canvas">
-          <p class="hint">载入中…</p>
-        </div>
-
-        <div id="editor-graph" class="editor-graph" hidden></div>
+        <div id="editor-graph" class="editor-graph"></div>
       </section>
 
       <!-- ============ 右：节点面板 ============ -->
@@ -96,7 +89,7 @@
         </div>
 
         <div class="panel-head">
-          <h2>本问卷的节点</h2>
+          <h2>本问卷结构</h2>
         </div>
         <div id="node-outline" class="node-outline">
           <p class="hint">载入中…</p>

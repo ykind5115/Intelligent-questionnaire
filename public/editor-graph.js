@@ -897,6 +897,34 @@ export function createNodeGraph(opts) {
       if (schema) fitTo(buildModel(schema, live));
     },
 
+    /**
+     * 选中某个节点并把它居中。
+     *
+     * 右栏清单点一行就调它 —— 图一复杂，光靠肉眼找节点很费劲。
+     * 这里顺带把缩放抬到至少 0.8：如果当前视野是缩得很小的「全览」，
+     * 直接居中会让节点小到看不清。
+     */
+    focus(questionId) {
+      const schema = opts.getSchema();
+      if (!schema) return;
+
+      const model = buildModel(schema, live);
+      const node = model.byId.get(questionId);
+      if (!node) return;
+
+      selectedId = questionId;
+      render();
+
+      const w = host.clientWidth;
+      const h = host.clientHeight;
+      if (!w || !h) return;
+
+      view.k = Math.max(view.k, 0.8);
+      view.tx = w / 2 - (node.x + NODE_W / 2) * view.k;
+      view.ty = h / 2 - (node.y + NODE_H / 2) * view.k;
+      applyView();
+    },
+
     /** 重新排布：按自动布局算一遍并整体保存 */
     async autoLayout() {
       const schema = opts.getSchema();

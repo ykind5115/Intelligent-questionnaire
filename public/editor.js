@@ -48,8 +48,6 @@ const state = {
   schema: null,
   /** 当前用户是否模板管理员（写操作需要） */
   isAdmin: false,
-  /** 拖拽中的元素描述 */
-  dragging: null,
   /** 乐观锁：模板草稿用 versionNo（见 questionnaire.service.ts） */
   revision: 1,
   /**
@@ -61,13 +59,6 @@ const state = {
    */
   questions: [],
   unreachable: [],
-  /**
-   * 视图模式：list = 列表（逐题检查）/ graph = 节点画布（看跳转关系）。
-   *
-   * 两种视图操作同一份数据（都落到后端的结构接口），
-   * 因此不存在「两边不一致」的问题 —— 只是同一份结构的两种呈现。
-   */
-  viewMode: "list",
 };
 
 /** 节点画布实例（首次切到节点视图时才创建） */
@@ -476,29 +467,61 @@ function render() {
  * 两种视图操作的是同一份数据（都走后端结构接口），
  * 所以切换视图不需要重新拉取，只是换一种呈现。
  */
+/**
+ * 渲染中间面板。
+ *
+ * 2026-10-20 起中间**只保留节点图**（列表信息移到右栏的紧凑清单里）。
+ * 因此这里不再有「视图切换」：要么渲染图，要么在没打开问卷时显示引导。
+ */
 function renderViews() {
-  const listBox = $("editor-canvas");
-  const graphBox = $("editor-graph");
-  const toGraph = state.viewMode === "graph";
+  const host = $("editor-graph");
+  if (!host) return;
 
-  listBox.hidden = toGraph;
-  graphBox.hidden = !toGraph;
-
-  const toggle = $("view-toggle");
-  if (toggle) {
-    for (const btn of toggle.querySelectorAll("button")) {
-      btn.classList.toggle("active", btn.dataset.view === state.viewMode);
-    }
+  if (!state.schema) {
+    renderEmptyState(host);
+    return;
   }
 
-  if (toGraph) {
-    ensureGraph();
-    // 画布是懒创建的：第一次切过来时容器刚显示，尺寸才有效
-    graphView.render();
-    graphView.fit();
-  } else {
-    renderCanvas();
+  ensureGraph();
+  // 画布是懒创建的：第一次渲染时容器刚可见，尺寸才有效
+  graphView.render();
+  graphView.fit();
+}
+
+/** 未打开任何问卷时的引导（占满中间面板） */
+function renderEmptyState(host) {
+  clear(host);
+
+  const empty = el("div", { className: "editor-empty" });
+  empty.appendChild(
+    el("p", {
+      text:
+        "还没有打开任何问卷。可以先新建一份模板，或加载一个已有模板" +
+        "（有草稿就打开草稿，没有就打开最新版本）。",
+    })
+  );
+
+  const row = el("div", { className: "editor-empty-actions" });
+  if (state.isAdmin) {
+    const go = button("+ 新建模板", { className: "btn btn-primary" });
+    go.addEventListener("click", createBlankTemplate);
+    row.appendChild(go);
   }
+  const load = button("加载已有模板", { className: "btn" });
+  load.addEventListener("click", openLoadTemplateModal);
+  row.appendChild(load);
+  empty.appendChild(row);
+
+  if (!state.isAdmin) {
+    empty.appendChild(
+      el("p", {
+        className: "hint",
+        text: "新建模板需要「模板管理员」账号，请在右上角切换用户。",
+      })
+    );
+  }
+
+  host.appendChild(empty);
 }
 
 /** 懒创建节点画布实例 */
@@ -540,21 +563,17 @@ async function saveNodeLayout(positions) {
   state.schema.layout = { ...(state.schema.layout ?? {}), ...positions };
 }
 
-/** 切换视图（切换前先把未落盘的坐标存掉） */
-async function switchView(next) {
-  if (next === state.viewMode) return;
-
-  if (graphView) await graphView.flush();
-
-  state.viewMode = next;
-  renderViews();
-}
-
-/** 只读原因提示（非草稿 / 非管理员） */
 function renderReadonlyHint() {
   const box = $("editor-hint");
   if (!box) return;
   clear(box);
+
+  // 还没打开任何问卷时不该出现「只读」「非管理员」提示 ——
+  // 那不是只读问题，而是空状态（中间面板有自己的引导）
+  if (!state.schema) {
+    box.hidden = true;
+    return;
+  }
 
   if (state.versionStatus !== "draft") {
     box.appendChild(
@@ -583,275 +602,6 @@ function renderReadonlyHint() {
   box.hidden = true;
 }
 
-/** 主画布：分组 + 问题 */
-function renderCanvas() {
-  const canvas = $("editor-canvas");
-  clear(canvas);
-
-  const sections = state.schema?.sections ?? [];
-  const editable = canEdit();
-
-  if (sections.length === 0) {
-    const empty = el("div", { className: "editor-empty" });
-    empty.appendChild(el("p", { text: "这份问卷还是空的。" }));
-    if (editable) {
-      const add = button("+ 添加第一个分组", { className: "btn btn-primary" });
-      add.addEventListener("click", addSection);
-      empty.appendChild(add);
-    }
-    canvas.appendChild(empty);
-    return;
-  }
-
-  sections.forEach((section, index) => {
-    canvas.appendChild(renderSectionCard(section, index, editable));
-  });
-
-  if (editable) {
-    const add = button("+ 添加分组", { className: "btn btn-sm" });
-    add.addEventListener("click", addSection);
-    const wrap = el("div", { className: "editor-add-section" });
-    wrap.appendChild(add);
-    // 允许把分组拖到这根「尾巴」上以放到最后
-    wrap.addEventListener("dragover", (e) => {
-      if (state.dragging?.kind === "section") e.preventDefault();
-    });
-    wrap.addEventListener("drop", (e) => {
-      if (state.dragging?.kind !== "section") return;
-      e.preventDefault();
-      moveSectionTo(state.dragging.id, state.schema.sections.length);
-    });
-    canvas.appendChild(wrap);
-  }
-}
-
-/** 一个分组卡片 */
-function renderSectionCard(section, index, editable) {
-  const card = el("div", { className: "sec-card" });
-  card.dataset.sectionId = section.id;
-
-  // ---- 头部：拖拽手柄 + 标题 + 操作 ----
-  const head = el("div", { className: "sec-head" });
-
-  if (editable) {
-    const handle = el("span", { className: "drag-handle", text: "⠿" });
-    handle.title = "拖动调整分组顺序";
-    handle.draggable = true;
-    handle.addEventListener("dragstart", (e) => {
-      state.dragging = { kind: "section", id: section.id };
-      e.dataTransfer.effectAllowed = "move";
-      // Firefox 需要设置数据，否则不触发 drop
-      e.dataTransfer.setData("text/plain", section.id);
-      card.classList.add("dragging");
-    });
-    handle.addEventListener("dragend", () => {
-      state.dragging = null;
-      card.classList.remove("dragging");
-      clearDropMarks();
-    });
-    head.appendChild(handle);
-  }
-
-  const titleWrap = el("div", { className: "sec-title" });
-  titleWrap.appendChild(
-    el("span", { className: "sec-index", text: `${index + 1}` })
-  );
-  titleWrap.appendChild(el("span", { text: section.title }));
-  titleWrap.appendChild(
-    el("span", {
-      className: "hint",
-      text: `${(section.questions ?? []).length} 道题`,
-    })
-  );
-  head.appendChild(titleWrap);
-
-  const actions = el("div", { className: "sec-actions" });
-  if (editable) {
-    const addQ = button("+ 题目", { className: "btn-ghost btn-sm" });
-    addQ.addEventListener("click", () => addQuestion(section.id));
-    actions.appendChild(addQ);
-
-    const rename = button("改名", { className: "btn-ghost btn-sm" });
-    rename.addEventListener("click", () => renameSection(section));
-    actions.appendChild(rename);
-
-    const del = button("删除分组", { className: "btn-ghost danger btn-sm" });
-    del.addEventListener("click", () => removeSection(section));
-    actions.appendChild(del);
-  }
-  head.appendChild(actions);
-  card.appendChild(head);
-
-  // ---- 分组拖放区（用于分组排序） ----
-  if (editable) {
-    card.addEventListener("dragover", (e) => {
-      if (state.dragging?.kind !== "section") return;
-      e.preventDefault();
-      const rect = card.getBoundingClientRect();
-      const before = e.clientY < rect.top + rect.height / 2;
-      card.classList.toggle("drop-before", before);
-      card.classList.toggle("drop-after", !before);
-    });
-    card.addEventListener("dragleave", () => {
-      card.classList.remove("drop-before", "drop-after");
-    });
-    card.addEventListener("drop", (e) => {
-      if (state.dragging?.kind !== "section") return;
-      e.preventDefault();
-      const rect = card.getBoundingClientRect();
-      const before = e.clientY < rect.top + rect.height / 2;
-      clearDropMarks();
-      moveSectionTo(state.dragging.id, before ? index : index + 1);
-    });
-  }
-
-  // ---- 问题列表 ----
-  const qList = el("div", { className: "q-list" });
-  const questions = section.questions ?? [];
-
-  if (questions.length === 0) {
-    qList.appendChild(
-      el("p", { className: "hint q-empty", text: "这个分组还没有题目。" })
-    );
-  }
-
-  questions.forEach((q, qi) => {
-    qList.appendChild(renderQuestionRow(section, q, qi, editable));
-  });
-
-  // 允许把题目拖到分组空白处 → 追加到该组末尾
-  if (editable) {
-    qList.addEventListener("dragover", (e) => {
-      if (state.dragging?.kind === "question") e.preventDefault();
-    });
-    qList.addEventListener("drop", (e) => {
-      if (state.dragging?.kind !== "question") return;
-      e.preventDefault();
-      // 落到具体题目行时由该行处理（stopPropagation），
-      // 能走到这里说明落在空白处 → 追加到末尾
-      dropQuestionOnSection(state.dragging.id, section.id, questions.length);
-    });
-  }
-
-  card.appendChild(qList);
-  return card;
-}
-
-/** 一道题的卡片 */
-function renderQuestionRow(section, q, index, editable) {
-  const row = el("div", { className: "q-card" });
-  row.dataset.questionId = q.id;
-
-  if (editable) {
-    const handle = el("span", { className: "drag-handle", text: "⠿" });
-    handle.title = "拖动调整题目顺序（可跨分组）";
-    handle.draggable = true;
-    handle.addEventListener("dragstart", (e) => {
-      state.dragging = {
-        kind: "question",
-        id: q.id,
-        fromSectionId: section.id,
-        fromIndex: index,
-      };
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", q.id);
-      row.classList.add("dragging");
-    });
-    handle.addEventListener("dragend", () => {
-      state.dragging = null;
-      row.classList.remove("dragging");
-      clearDropMarks();
-    });
-    row.appendChild(handle);
-  }
-
-  const main = el("div", { className: "q-main" });
-  const line1 = el("div", { className: "q-line1" });
-  line1.appendChild(el("span", { className: "q-index", text: `${index + 1}` }));
-  line1.appendChild(el("span", { className: "q-title", text: q.title }));
-  line1.appendChild(
-    el("span", {
-      className: "tag",
-      text: QUESTION_TYPE_LABEL[q.type] ?? q.type,
-    })
-  );
-  if (q.required) line1.appendChild(el("span", { className: "tag required", text: "必填" }));
-  main.appendChild(line1);
-
-  if (q.description) {
-    main.appendChild(el("div", { className: "hint", text: q.description }));
-  }
-  if (CHOICE_TYPES.includes(q.type) && (q.options ?? []).length > 0) {
-    main.appendChild(
-      el("div", {
-        className: "hint",
-        text: `选项：${q.options.map((o) => o.label).join(" / ")}`,
-      })
-    );
-  }
-
-  // 分支摘要必须显示在题目上：只靠一个「设分支」按钮的话，
-  // 看结构的人不知道这一题会不会跳走、会跳过谁 —— 那恰恰是分支最容易出错的地方。
-  const summary = renderBranchSummary(q);
-  if (summary) main.appendChild(summary);
-
-  row.appendChild(main);
-
-  const actions = el("div", { className: "q-actions" });
-  if (editable) {
-    const branchBtn = button(hasBranch(q) ? "改分支" : "设分支", {
-      className: "btn-ghost btn-sm",
-    });
-    branchBtn.addEventListener("click", () => openBranchEditor(q.id));
-    actions.appendChild(branchBtn);
-
-    const edit = button("编辑", { className: "btn-ghost btn-sm" });
-    edit.addEventListener("click", () => editQuestion(q));
-    actions.appendChild(edit);
-
-    const del = button("删除", { className: "btn-ghost danger btn-sm" });
-    del.addEventListener("click", () => removeQuestion(q));
-    actions.appendChild(del);
-  }
-  row.appendChild(actions);
-
-  if (editable) {
-    row.addEventListener("dragover", (e) => {
-      if (state.dragging?.kind !== "question") return;
-      // 阻止冒泡，否则会走到分组的「追加到末尾」
-      e.stopPropagation();
-      e.preventDefault();
-      const rect = row.getBoundingClientRect();
-      const before = e.clientY < rect.top + rect.height / 2;
-      row.classList.toggle("drop-before", before);
-      row.classList.toggle("drop-after", !before);
-    });
-    row.addEventListener("dragleave", () => {
-      row.classList.remove("drop-before", "drop-after");
-    });
-    row.addEventListener("drop", (e) => {
-      if (state.dragging?.kind !== "question") return;
-      e.stopPropagation();
-      e.preventDefault();
-      const rect = row.getBoundingClientRect();
-      const before = e.clientY < rect.top + rect.height / 2;
-      clearDropMarks();
-      const targetIndex = before ? index : index + 1;
-      dropQuestionOnSection(state.dragging.id, section.id, targetIndex);
-    });
-  }
-
-  return row;
-}
-
-function clearDropMarks() {
-  for (const node of document.querySelectorAll(
-    ".drop-before, .drop-after"
-  )) {
-    node.classList.remove("drop-before", "drop-after");
-  }
-}
-
 // ============================================================
 // 侧栏与统计
 // ============================================================
@@ -863,19 +613,14 @@ function renderSidebar() {
   box.appendChild(
     el("p", {
       className: "hint",
-      text:
-        state.viewMode === "graph"
-          ? canEdit()
-            ? "拖动节点调整位置；按住节点下方的圆点拖到另一个节点，即可为它建一条分支；双击节点编辑内容；滚轮缩放、空白处拖动平移。"
-            : "当前为只读视图。节点位置、顺序边与分支边都可以看，但不能修改。"
-          : canEdit()
-            ? "拖动左侧的 ⠿ 手柄可以调整分组与题目的顺序；点「编辑」改内容，点「设分支」配条件跳题。"
-            : "当前为只读视图。",
+      text: canEdit()
+        ? "拖动节点调整位置；按住节点下方的圆点拖到另一个节点，即可为它建一条分支；双击节点编辑内容；滚轮缩放、空白处拖动平移。"
+        : "当前为只读视图。节点位置、顺序边与分支边都可以看，但不能修改。",
     })
   );
 
-  // ---- 节点视图的画布操作 ----
-  if (state.viewMode === "graph") {
+  // ---- 画布操作 ----
+  {
     const ops = el("div", { className: "editor-side-block graph-ops" });
 
     const fitBtn = button("适配视图", { className: "btn btn-sm" });
@@ -2037,71 +1782,6 @@ async function retargetEdge(edge, targetId) {
 }
 
 // ============================================================
-// 拖拽落点计算
-// ============================================================
-
-/** 把分组移到目标位置（newIndex 是「插入后它的下标」） */
-async function moveSectionTo(sectionId, newIndex) {
-  const ids = state.schema.sections.map((s) => s.id);
-  const from = ids.indexOf(sectionId);
-  if (from < 0) return;
-
-  const without = ids.filter((id) => id !== sectionId);
-  // 原位置在目标之前时，摘除后下标要减 1
-  const target = from < newIndex ? newIndex - 1 : newIndex;
-  const clamped = Math.max(0, Math.min(target, without.length));
-  without.splice(clamped, 0, sectionId);
-
-  if (without.join(",") === ids.join(",")) return; // 没变
-  await callApi("PATCH", "/sections/reorder", { sectionIds: without });
-}
-
-/**
- * 把题目拖到某个分组的指定位置。
- *
- * 同组内移动用 reorder_questions（一次原子写，前端不必推算跨过的项）；
- * 跨组移动用 move_question（后端支持 targetSectionId + targetOrder）。
- */
-async function dropQuestionOnSection(questionId, targetSectionId, targetIndex) {
-  const source = state.schema.sections.find((s) =>
-    (s.questions ?? []).some((q) => q.id === questionId)
-  );
-  if (!source) return;
-
-  const fromIndex = source.questions.findIndex((q) => q.id === questionId);
-  const sameSection = source.id === targetSectionId;
-
-  if (sameSection) {
-    const ids = source.questions.map((q) => q.id);
-    const without = ids.filter((id) => id !== questionId);
-    const target = fromIndex < targetIndex ? targetIndex - 1 : targetIndex;
-    const clamped = Math.max(0, Math.min(target, without.length));
-    without.splice(clamped, 0, questionId);
-
-    if (without.join(",") === ids.join(",")) return;
-    await callApi("PATCH", "/questions/reorder", {
-      sectionId: targetSectionId,
-      questionIds: without,
-    });
-    return;
-  }
-
-  // 跨分组：targetOrder 是 1 起的位置（追加到末尾则省略）
-  const targetSection = state.schema.sections.find((s) => s.id === targetSectionId);
-  if (!targetSection) return;
-  const isAppend = targetIndex >= targetSection.questions.length;
-
-  await callApi(
-    "PATCH",
-    `/questions/${encodeURIComponent(questionId)}/move`,
-    {
-      targetSectionId,
-      ...(isAppend ? {} : { targetOrder: targetIndex + 1 }),
-    }
-  );
-}
-
-// ============================================================
 // 发布 / 新建草稿版本
 // ============================================================
 
@@ -2513,17 +2193,15 @@ async function saveAsDraft() {
 // 右栏：节点面板（可添加的节点类型 + 本问卷的节点）
 // ============================================================
 
-/** 把某个节点定位到视野里（列表视图滚动 + 高亮；节点视图切回列表） */
+/**
+ * 把某个节点定位到视野里（中间只剩节点图，因此是「选中 + 居中」）。
+ *
+ * 为什么要有它：右栏清单是「结构索引」，点一行应该能在图上找到对应节点 ——
+ * 否则图一复杂就只能靠肉眼找。
+ */
 function focusQuestion(questionId) {
-  if (state.viewMode !== "list") {
-    state.viewMode = "list";
-    renderViews();
-  }
-  const node = document.querySelector(`[data-question-id="${questionId}"]`);
-  if (!node) return;
-  node.scrollIntoView({ behavior: "smooth", block: "center" });
-  node.classList.add("q-card-flash");
-  setTimeout(() => node.classList.remove("q-card-flash"), 1600);
+  if (!graphView || !state.schema) return;
+  graphView.focus(questionId);
 }
 
 /** 最后一个分组（新题默认加到这里） */
@@ -2543,6 +2221,18 @@ async function addQuestionFromPalette(type) {
   await addQuestion(section.id, type);
 }
 
+/**
+ * 右栏「节点」面板。
+ *
+ * 两件事：
+ *   1. **节点类型**：每种题型是一个**唯一的节点种类**，但可以在问卷里用多次，
+ *      因此每个按钮上标出「×N」= 本问卷已用了几个。点击 = 再加一个。
+ *   2. **本问卷结构**：把原来的列表信息压缩成紧凑清单（中间面板已只放节点图），
+ *      并承载编辑/删除/上下移动这些操作。
+ *
+ * 为什么把操作放在右栏：中间只剩图，图上没有「改题干 / 删题 / 调顺序」的位置；
+ * 而清单本身是结构索引，把操作放在它旁边最顺手。
+ */
 function renderNodePanel() {
   const palette = $("node-palette");
   const outline = $("node-outline");
@@ -2552,18 +2242,36 @@ function renderNodePanel() {
   clear(outline);
 
   const editable = canEdit();
+  const sections = [...(state.schema?.sections ?? [])].sort(
+    (a, b) => a.order - b.order
+  );
 
-  // ---- 可添加的节点类型 ----
-  const secBtn = button("+ 分组", { className: "btn btn-sm" });
+  // ---- 用量统计：题型 → 出现次数 ----
+  const usage = new Map();
+  for (const section of sections) {
+    for (const q of section.questions ?? []) {
+      usage.set(q.type, (usage.get(q.type) ?? 0) + 1);
+    }
+  }
+
+  // ---- 分组（也是一个可重复使用的节点种类）----
+  const secBtn = button(`＋ 分组 ×${sections.length}`, { className: "btn btn-sm" });
   secBtn.disabled = !editable;
+  secBtn.title = "新建一个分组";
   secBtn.addEventListener("click", addSection);
   palette.appendChild(secBtn);
 
+  // ---- 题型：唯一但可多次使用，标出用量 ----
   const grid = el("div", { className: "palette-grid" });
   for (const [type, label] of Object.entries(QUESTION_TYPE_LABEL)) {
-    const b = button(label, { className: "btn btn-sm palette-btn" });
+    const count = usage.get(type) ?? 0;
+    const b = button(`${label} ×${count}`, { className: "btn btn-sm palette-btn" });
     b.disabled = !editable;
-    b.title = `在最后一个分组里添加一道「${label}」题`;
+    b.classList.toggle("palette-unused", count === 0);
+    b.title =
+      count > 0
+        ? `本问卷已用 ${count} 个「${label}」；点击再加一个`
+        : `本问卷还没用过「${label}」；点击添加`;
     b.addEventListener("click", () => void addQuestionFromPalette(type));
     grid.appendChild(b);
   }
@@ -2575,8 +2283,7 @@ function renderNodePanel() {
     );
   }
 
-  // ---- 本问卷的节点 ----
-  const sections = state.schema?.sections ?? [];
+  // ---- 本问卷结构（紧凑清单）----
   if (sections.length === 0) {
     outline.appendChild(
       el("p", { className: "hint", text: "还没有节点。用上面的按钮添加分组与题目。" })
@@ -2584,15 +2291,42 @@ function renderNodePanel() {
     return;
   }
 
-  const ordered = [...sections].sort((a, b) => a.order - b.order);
-  ordered.forEach((section, si) => {
+  sections.forEach((section, si) => {
     const block = el("div", { className: "outline-section" });
-    block.appendChild(
-      el("div", {
-        className: "outline-title",
-        text: `${si + 1}. ${section.title}`,
+
+    const head = el("div", { className: "outline-section-head" });
+    head.appendChild(
+      el("span", { className: "outline-title", text: `${si + 1}. ${section.title}` })
+    );
+    head.appendChild(
+      el("span", {
+        className: "outline-count",
+        text: `${(section.questions ?? []).length}`,
       })
     );
+
+    if (editable) {
+      const acts = el("span", { className: "outline-actions" });
+
+      acts.appendChild(
+        tinyAction("＋", "在本分组末尾加一道题", () => void addQuestion(section.id))
+      );
+      acts.appendChild(
+        tinyAction("改名", "重命名分组", () => void renameSection(section))
+      );
+      acts.appendChild(
+        tinyAction("↑", "上移分组", () => void moveSection(section, -1))
+      );
+      acts.appendChild(
+        tinyAction("↓", "下移分组", () => void moveSection(section, 1))
+      );
+      acts.appendChild(
+        tinyAction("删", "删除分组", () => void removeSection(section))
+      );
+
+      head.appendChild(acts);
+    }
+    block.appendChild(head);
 
     const questions = [...(section.questions ?? [])].sort(
       (a, b) => a.order - b.order
@@ -2602,44 +2336,165 @@ function renderNodePanel() {
     }
 
     questions.forEach((q, qi) => {
-      const row = el("div", { className: "outline-item" });
-      row.appendChild(
-        el("span", { className: "outline-index", text: `${si + 1}.${qi + 1}` })
-      );
-      row.appendChild(
-        el("span", {
-          className: "outline-label",
-          text: q.title || "（无题干）",
+      block.appendChild(
+        renderOutlineQuestion({
+          q,
+          section,
+          label: `${si + 1}.${qi + 1}`,
+          isFirst: qi === 0,
+          isLast: qi === questions.length - 1,
+          editable,
         })
       );
-      if (q.branches?.length) {
-        row.appendChild(
-          el("span", { className: "outline-branch", text: `⇢${q.branches.length}` })
-        );
-      }
-      const unreachable = state.unreachable.includes(q.id);
-      if (unreachable) {
-        row.appendChild(el("span", { className: "outline-warn", text: "⚠" }));
-      }
-      row.addEventListener("click", () => focusQuestion(q.id));
-      block.appendChild(row);
     });
 
     outline.appendChild(block);
   });
 }
 
+/** 一个小号文字操作钮（悬停才显眼，避免清单被按钮撑开） */
+function tinyAction(label, title, onClick) {
+  const b = button(label, { className: "btn-link" });
+  b.title = title;
+  b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onClick();
+  });
+  return b;
+}
+
+/** 清单里的一行题目 */
+function renderOutlineQuestion({
+  q,
+  section,
+  label,
+  isFirst,
+  isLast,
+  editable,
+}) {
+  const row = el("div", { className: "outline-item" });
+  row.dataset.questionId = q.id;
+
+  row.appendChild(el("span", { className: "outline-index", text: label }));
+  row.appendChild(
+    el("span", { className: "outline-label", text: q.title || "（无题干）" })
+  );
+
+  // 题型 + 必填，用极小字号放在题干后面
+  const meta = [QUESTION_TYPE_LABEL[q.type] ?? q.type, q.required ? "必填" : ""]
+    .filter(Boolean)
+    .join("·");
+  row.appendChild(el("span", { className: "outline-meta", text: meta }));
+
+  if (q.branches?.length) {
+    row.appendChild(
+      el("span", { className: "outline-branch", text: `⇢${q.branches.length}` })
+    );
+  }
+  if (state.unreachable.includes(q.id)) {
+    row.appendChild(el("span", { className: "outline-warn", text: "⚠" }));
+  }
+
+  if (editable) {
+    const acts = el("span", { className: "outline-actions" });
+    acts.appendChild(tinyAction("✎", "编辑这道题", () => void editQuestion(q)));
+    acts.appendChild(
+      tinyAction("⇢", "配置分支", () => openBranchEditor(q.id))
+    );
+    acts.appendChild(
+      tinyAction("↑", "上移", () => void moveQuestionWithin(section, q, -1))
+    );
+    acts.appendChild(
+      tinyAction("↓", "下移", () => void moveQuestionWithin(section, q, 1))
+    );
+    acts.appendChild(
+      tinyAction("移到", "移动到其他分组", () => void moveQuestionToSection(q))
+    );
+    acts.appendChild(tinyAction("删", "删除这道题", () => void removeQuestion(q)));
+    row.appendChild(acts);
+  }
+
+  // 点整行 = 在图上选中并居中
+  row.addEventListener("click", () => focusQuestion(q.id));
+  void isFirst;
+  void isLast;
+  return row;
+}
+
+/** 分组上移 / 下移（跨分组顺序） */
+async function moveSection(section, delta) {
+  const ids = [...state.schema.sections]
+    .sort((a, b) => a.order - b.order)
+    .map((s) => s.id);
+
+  const idx = ids.indexOf(section.id);
+  const target = idx + delta;
+  if (idx < 0 || target < 0 || target >= ids.length) return;
+
+  const next = [...ids];
+  next.splice(idx, 1);
+  next.splice(target, 0, section.id);
+
+  await callApi("PATCH", "/sections/reorder", { sectionIds: next });
+}
+
+/** 题目在**本分组内**上移 / 下移 */
+async function moveQuestionWithin(section, q, delta) {
+  const ids = [...(section.questions ?? [])]
+    .sort((a, b) => a.order - b.order)
+    .map((x) => x.id);
+
+  const idx = ids.indexOf(q.id);
+  const target = idx + delta;
+  if (idx < 0 || target < 0 || target >= ids.length) return;
+
+  const next = [...ids];
+  next.splice(idx, 1);
+  next.splice(target, 0, q.id);
+
+  await callApi("PATCH", "/questions/reorder", {
+    sectionId: section.id,
+    questionIds: next,
+  });
+}
+
 /**
- * 页面初始化。
+ * 把题目移到另一个分组（追加到该组末尾）。
  *
- * 页面已合并：左侧 AI 对话、中间编辑器、右侧节点面板，
- * 三者围绕**同一个草稿版本**工作。
- *
- * 进入方式（URL 参数）：
- *   /editor.html                          空白状态，可新建 / 加载
- *   /editor.html?templateId=X             自动挑该模板最新的草稿版本
- *   /editor.html?templateId=X&versionId=Y 直接打开指定版本
+ * 原先这件事只能靠列表视图拖拽；中间改成只放节点图之后，
+ * 需要在右栏保留这个能力，否则「跨分组移动」就悄悄没了。
  */
+async function moveQuestionToSection(q) {
+  const sections = [...state.schema.sections].sort((a, b) => a.order - b.order);
+  const current = sections.find((s) =>
+    (s.questions ?? []).some((x) => x.id === q.id)
+  );
+  const targets = sections.filter((s) => s.id !== current?.id);
+
+  if (targets.length === 0) {
+    toast("只有一个分组，没有别的地方可移", true);
+    return;
+  }
+
+  const values = await formModal({
+    title: `移动「${q.title}」`,
+    okText: "移动",
+    spec: [
+      {
+        key: "sectionId",
+        label: "移动到哪个分组（追加到末尾）",
+        type: "select",
+        options: targets.map((s) => [s.id, s.title]),
+      },
+    ],
+  });
+  if (!values || !values.sectionId) return;
+
+  await callApi("PATCH", `/questions/${encodeURIComponent(q.id)}/move`, {
+    targetSectionId: values.sectionId,
+  });
+}
+
 async function init() {
   const params = new URLSearchParams(location.search);
   state.templateId = params.get("templateId");
@@ -2680,16 +2535,6 @@ async function init() {
   const saveDraftBtn = $("btn-save-draft");
   if (saveDraftBtn) saveDraftBtn.addEventListener("click", saveAsDraft);
 
-  // ---- 视图切换：列表 / 节点 ----
-  const toggle = $("view-toggle");
-  if (toggle) {
-    toggle.addEventListener("click", (e) => {
-      const btn = e.target.closest("button[data-view]");
-      if (!btn) return;
-      void switchView(btn.dataset.view);
-    });
-  }
-
   // 离开页面前把没落盘的坐标存掉（防抖可能还没到）
   window.addEventListener("beforeunload", () => {
     void graphView?.flush();
@@ -2714,41 +2559,8 @@ async function init() {
 
   // ---- 什么都没打开：引导新建或加载 ----
   if (!state.templateId || !state.versionId) {
-    const canvas = $("editor-canvas");
-    clear(canvas);
-    const empty = el("div", { className: "editor-empty" });
-    empty.appendChild(
-      el("p", {
-        text:
-          "还没有打开任何问卷。可以先新建一份模板，或加载一个已有模板" +
-          "（有草稿就打开草稿，没有就打开最新版本）。",
-      })
-    );
-
-    const row = el("div", { className: "editor-empty-actions" });
-    if (state.isAdmin) {
-      const go = button("+ 新建模板", { className: "btn btn-primary" });
-      go.addEventListener("click", createBlankTemplate);
-      row.appendChild(go);
-    }
-    const load = button("加载已有模板", { className: "btn" });
-    load.addEventListener("click", openLoadTemplateModal);
-    row.appendChild(load);
-    empty.appendChild(row);
-
-    if (!state.isAdmin) {
-      empty.appendChild(
-        el("p", {
-          className: "hint",
-          text: "新建模板需要「模板管理员」账号，请在右上角切换用户。",
-        })
-      );
-    }
-
-    canvas.appendChild(empty);
-    renderSidebar();
-    renderNodePanel();
-    chatPanel.render();
+    state.schema = null;
+    render();
     return;
   }
 
