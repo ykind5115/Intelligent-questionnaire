@@ -357,14 +357,27 @@ CI 不依赖 `AI_API_KEY`。**需要真实模型验证时**：
 public/index.html      下发问卷（首页，/）：搜索选模板 → 建案件
 public/instances.html  案件管理：看已下发案件的状态/下发给谁/答卷进度，
                        并可确认 / 撤回 / 扶正
-public/create.html     从零创建：先取名 → AI 对话 → 定稿 → 发布 → 立即建案
 public/templates.html  模板管理：搜索 / 查看结构 / 改名 / 发布 / 停用 / 删除
-public/common.js       四页共用：api / toast / el / 用户选择器 / 顶栏 tab / 格式化
-public/app.css         四页共用样式
+public/editor.html     问卷编辑器（**三栏合并页**，2026-10-20 起）：
+                       左 AI 对话 / 中 编辑器（列表 + 节点画布）/ 右 节点面板
+public/create.html     已合并进 editor.html —— 现在只是一个跳转页（保留防 404）
+public/common.js      各页共用：api / toast / el / 用户选择器 / 顶栏 tab / 格式化
+public/app.css         各页共用样式
 ```
 
-各页脚本是 `dispatch.js` / `instances.js` / `create.js` / `templates.js`，
+各页脚本是 `dispatch.js` / `instances.js` / `templates.js` / `editor.js`，
 通过 `<script type="module">` 加载。
+
+编辑器内部拆成三个模块（都在 `public/`，都是原生 ES 模块）：
+
+- `editor.js`：页面骨架、列表视图、分支配置、模板的新建/加载/保存草稿、右栏节点面板
+- `editor-graph.js`：节点画布（自研 SVG），含边的点选与删除/改目标
+- `editor-ai.js`：左侧 AI 对话面板（SSE 流式）
+
+> **AI 面板绑定的是「当前打开的那个草稿版本」**，不是新建模板：
+> 创建会话时传 `scene: create_template` + `targetId: <versionId>`。
+> 因此 AI 的改动与手工编辑落在同一份结构上。切换版本时必须重新绑定 —— 
+> 复用旧会话会让 AI 继续改上一个版本，这是最难察觉的一类错误。
 
 **共用逻辑必须放进 `common.js`**，不要各页复制一份 ——
 复制出来的版本会行为漂移（本项目已经因为「测试里手搭的 app 与真实 app
@@ -383,6 +396,8 @@ public/app.css         四页共用样式
   设计见 [docs/11-future-capability-plan.md](docs/11-future-capability-plan.md) 第 4 节，
   裁决依据是 [09](docs/09-review-and-decisions.md) 的决策 **D16**（结论：**不换表**）
 - **答卷填写页与审核页仍缺**（见上一节），分支能力因此目前只能靠 API 使用
+- ~~手工编辑没有「保存为草稿」入口~~ → **已补**：`POST .../versions/:vid/save-draft`
+  （复用 `commitDraftVersion`，原先只被 AI 的 commit 调用）
 - `docs/` 下的 `文档一.md`、`问卷系统数据库设计文档.md`、`问卷系统数据库模型图.html`
   是**需求输入**，不在本仓库的编号体系内。它们提出的行式 DAG 邻接表方案**当前不采用**（D16）
 - 连接池上限默认 5（`src/database/client.ts` 里的 `POOL_MAX`，
