@@ -472,6 +472,58 @@ describe("checkFlow：方向约束（V4 / V4b）", () => {
 });
 
 // ============================================================
+// 留空（NO_NEXT）：删掉出边之后的第四种状态
+// ============================================================
+
+describe("resolveFlow / checkFlow：留空（NO_NEXT）", () => {
+  it("defaultNext = '#none' → 流程在此结束，且不算悬空引用", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1, defaultNext: "#none" },
+      { id: "q2", order: 2 },
+    ]);
+
+    // 结构合法：'#none' 是留空哨兵，不是「指向一个不存在的题目」
+    expect(checkFlow(schema)).toEqual([]);
+
+    const result = resolveFlow(schema, {});
+    expect(ids(result)).toEqual(["q1"]);
+    expect(result.endedBy).toBe("explicit");
+  });
+
+  it("留空之后的题目变成不可达（会给出告警）", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1, defaultNext: "#none" },
+      { id: "q2", order: 2 },
+    ]);
+    expect(findUnreachable(schema)).toEqual(["q2"]);
+  });
+
+  it("与 defaultNext: null 的运行时行为相同（都结束），但语义不同", () => {
+    const blank = schemaOf([
+      { id: "q1", order: 1, defaultNext: "#none" },
+      { id: "q2", order: 2 },
+    ]);
+    const explicitEnd = schemaOf([
+      { id: "q1", order: 1, defaultNext: null },
+      { id: "q2", order: 2 },
+    ]);
+
+    expect(ids(resolveFlow(blank, {}))).toEqual(ids(resolveFlow(explicitEnd, {})));
+    // 两者都合法；区别只在画布上画不画那条到「结束」的线
+    expect(checkFlow(blank)).toEqual([]);
+    expect(checkFlow(explicitEnd)).toEqual([]);
+  });
+
+  it("留空不会被方向校验误判（它不是题目 id，没有位置）", () => {
+    const schema = schemaOf([
+      { id: "q1", order: 1 },
+      { id: "q2", order: 2, defaultNext: "#none" },
+    ]);
+    expect(checkFlow(schema)).toEqual([]);
+  });
+});
+
+// ============================================================
 // 环收敛检测
 // ============================================================
 

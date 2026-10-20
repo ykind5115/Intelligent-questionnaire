@@ -649,6 +649,31 @@ describe("设置分支（REST）", () => {
     expect(JSON.stringify(res.body.error)).toMatch(/branches/);
   });
 
+  it("**留空（defaultNext = '#none'）**：该题之后不再往下走，且不报 400", async () => {
+    const fx = await buildFixture({ withGates: false });
+
+    // 「删除一条边」在界面上的实际效果就是写这个哨兵
+    const res = await apiRequest(
+      client,
+      "PATCH",
+      `${base(fx.templateId, fx.versionId)}/questions/${fx.ids["date"]}/branch`,
+      { userId: USERS.admin, body: { branches: [], defaultNext: "#none" } }
+    );
+    expect(res.status, JSON.stringify(res.body.error)).toBe(200);
+
+    const instanceId = await publishAndDispatch(fx.templateId, fx.versionId);
+    const fill = await readFill(instanceId);
+
+    await saveAnswers(fill.responseId, [
+      { questionId: fx.ids["has"], answer: false },
+    ]);
+
+    const after = await readFill(instanceId);
+    // date 之后留空：reason 与 note 不再进入路径
+    expect(after.flow.questionIds).toEqual([fx.ids["has"], fx.ids["date"]]);
+    expect(after.flow.endedBy).toBe("explicit");
+  });
+
   it("分支指向不存在的**条件**题目 → 被拒绝", async () => {
     const fx = await buildFixture();
     const res = await apiRequest(

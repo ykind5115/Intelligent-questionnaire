@@ -917,6 +917,15 @@ const OPERATOR_LABEL = {
   is_empty: "未作答",
 };
 
+/**
+ * 「留空」哨兵：与该题关联的出边被删除后，`defaultNext` 写这个值。
+ *
+ * 与后端 `flow.ts` 的 NO_NEXT、`editor-graph.js` 的同名常量是同一个值。
+ * 语义：**不画任何出边**，流程到此结束。
+ * 与 `null`（显式接到「结束」节点）的区别只在画布呈现。
+ */
+const NO_NEXT = "#none";
+
 /** 不需要 value 的操作符 */
 const VALUELESS_OPERATORS = ["is_answered", "is_empty"];
 
@@ -1003,8 +1012,10 @@ function renderBranchSummary(q) {
   }
 
   const fallback = el("div", { className: "branch-line fallback" });
-  if (q.defaultNext === null) {
-    fallback.appendChild(el("span", { text: "否则：本题作答后问卷结束" }));
+  if (q.defaultNext === NO_NEXT) {
+    fallback.appendChild(el("span", { text: "否则：留空（不连接任何节点）" }));
+  } else if (q.defaultNext === null) {
+    fallback.appendChild(el("span", { text: "否则：接到「结束」节点" }));
   } else if (typeof q.defaultNext === "string") {
     fallback.appendChild(el("span", { text: "否则：跳到" }));
     fallback.appendChild(el("span", { text: `「${questionTitle(q.defaultNext)}」` }));
@@ -1562,11 +1573,14 @@ const EDGE_KIND_INFO = {
     title: "顺序边",
     desc:
       "没有配置「否则」时的默认走向 —— 按题目顺序走下一题。" +
-      "这条线是**自动存在**的，不是谁连上去的。删掉它 = 本题作答后问卷结束。",
+      "这条线是**自动存在**的，不是谁连上去的。" +
+      "删掉它 = 本题之后**留空**（不连接任何节点，也不会自动接到结束）。",
   },
   end: {
     title: "终点边",
-    desc: "本题作答后问卷结束（「否则」= 结束）。改成「按顺序」= 继续走下一题。",
+    desc:
+      "本题显式接到「结束」节点（「否则」= 结束）。" +
+      "删除它 = 改回按顺序继续；想留空请改用「删除顺序边」那条路径。",
   },
 };
 
@@ -1704,7 +1718,7 @@ function openEdgeEditor(edge) {
 function delLabelOf(edge, isLast) {
   if (edge.kind === "branch") return "删除这条分支";
   if (edge.kind === "order") {
-    return isLast ? "删除这条连接（仍会结束）" : "删除这条连接（本题结束）";
+    return "删除这条连接（留空）";
   }
   if (edge.kind === "end") return "删除终点（改成按顺序继续）";
   return "删除默认边（回到按顺序）";
@@ -1736,14 +1750,14 @@ async function deleteEdge(edge, { isLast }) {
   }
 
   if (edge.kind === "order") {
-    // 顺序边的「删除」本意是「不要往下走到那一题」。
-    // 而 fallthrough 本身就是「往下走」，所以只有把本题设为终点才能真的断开。
-    if (isLast) {
-      toast("本题已是最后一题，置为终点也仍然是结束", true);
-      return;
-    }
-    const data = await writeBranchConfig(edge.from, branches, null);
-    if (data !== null) toast("已删除顺序连接：本题作答后问卷结束");
+    // 删除顺序边 = 让这条出边**留空**。
+    //
+    // 不能写 null：null 表示「显式接到结束节点」，会在图上画一条线到 END ——
+    // 需求方明确不要这种「删掉一条边、又自动长出另一条」的行为。
+    // 写 NO_NEXT 之后这里什么都不画，流程到此结束。
+    const data = await writeBranchConfig(edge.from, branches, NO_NEXT);
+    if (data !== null) toast("已删除这条连接（留空，不连接任何节点）");
+    void isLast;
     return;
   }
 

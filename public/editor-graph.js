@@ -28,6 +28,22 @@ const COL_GAP = 96;
 const ROW_GAP = 48;
 const PAD = 64;
 
+/**
+ * 「留空」哨兵：题目 `defaultNext === NO_NEXT` 表示**不画出边**。
+ *
+ * 与后端 `src/modules/questionnaire/operations/flow.ts` 里的 NO_NEXT 是同一个值。
+ * 原生 JS 没法 import TS，所以这里重复一份，改的时候两边一起改。
+ */
+const NO_NEXT = "#none";
+
+/**
+ * 「结束」节点的坐标键。
+ *
+ * 它没有对应题目，但需要能拖动，所以借用 layout 映射里的一个保留键
+ * （后端 set-node-layout 对该键特批保留，不会被当成幽灵坐标删掉）。
+ */
+const END_NODE_KEY = "__end__";
+
 /** 分支边的配色（按规则序号循环） */
 const EDGE_COLORS = [
   "#2f6fdb",
@@ -125,6 +141,34 @@ function describeRule(rule, byId) {
   return `${op} ${shown}`;
 }
 
+/**
+ * 读取页面当前的 CSS `zoom`。
+ *
+ * ## 为什么必须要它
+ *
+ * 编辑页用 `body.page-editor { zoom: 0.7 }` 整体缩放。
+ * 在 zoom 生效时：
+ *   - `MouseEvent.clientX` 与 `getBoundingClientRect()` 都是**视觉像素**（已被缩放）；
+ *   - 而 SVG 内部的 transform / 节点坐标是**未缩放的布局像素**。
+ *
+ * 直接拿视觉位移当布局位移用，节点就会移动「1/zoom 倍」的距离 ——
+ * 表现就是**拖动不跟手、鼠标和节点各走各的**。拖节点、平移画布、滚轮缩放
+ * 三处都受影响。
+ *
+ * 取值的两种来源：先读计算样式里的 `zoom`（Chromium 会给出数值），
+ * 读不到再退回 CSS 变量 `--ui-zoom`；都没有就当 1。
+ */
+function uiZoom() {
+  const cs = getComputedStyle(document.body);
+  const direct = Number.parseFloat(cs.zoom);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+
+  const fromVar = Number.parseFloat(cs.getPropertyValue("--ui-zoom"));
+  if (Number.isFinite(fromVar) && fromVar > 0) return fromVar;
+
+  return 1;
+}
+
 // ============================================================
 // 图模型
 // ============================================================
@@ -196,7 +240,17 @@ function buildModel(schema, live) {
     });
 
     // 2) 默认去向
-    if (node.defaultNext === null) {
+    //
+    // 四种状态（与后端 flow.ts 一致）：
+    //   NO_NEXT  → **留空**：不画任何出边
+    //   null     → 显式接到「结束」节点（画一条线）
+    //   题目 id   → 跳到该题
+    //   省略     → 按顺序走下一题；**没有下一题时什么也不画**
+    //              （原先会画一条到「结束」的线 —— 需求方明确要求去掉：
+    //                每个末尾节点都自动连到结束，图上全是噪音）
+    if (node.defaultNext === NO_NEXT) {
+      // 留空
+    } else if (node.defaultNext === null) {
       edges.push({ kind: "end", from: node.id, to: null, index: 0 });
     } else if (typeof node.defaultNext === "string") {
       if (byId.has(node.defaultNext)) {
@@ -209,11 +263,9 @@ function buildModel(schema, live) {
       }
     } else {
       const next = nextOf(node.id);
-      edges.push(
-        next
-          ? { kind: "order", from: node.id, to: next, index: 0 }
-          : { kind: "end", from: node.id, to: null, index: 0 }
-      );
+      if (next) {
+        edges.push({ kind: "order", from: node.id, to: next, index: 0 });
+      }
     }
   }
 
@@ -230,14 +282,19 @@ function buildModel(schema, live) {
     const from = byId.get(e.from);
     if (from) endY = Math.max(endY, from.y + NODE_H + 72);
   }
-  const end = {
-    x:
-      PAD +
-      Math.max(0, sections.length - 1) * (NODE_W + COL_GAP) +
-      NODE_W / 2 -
-      48,
-    y: endY,
-  };
+
+  // 「结束」节点可以被拖动，因此优先用布局里记下的位置
+  const savedEnd = savedLayout[END_NODE_KEY];
+  const end = savedEnd
+    ? { x: savedEnd.x, y: savedEnd.y }
+    : {
+        x:
+          PAD +
+          Math.max(0, sections.length - 1) * (NODE_W + COL_GAP) +
+          NODE_W / 2 -
+          48,
+        y: endY,
+      };
 
   return { nodes, edges, start, end, byId, order };
 }
@@ -489,24 +546,55 @@ export function createNodeGraph(opts) {
     return g;
   }
 
+  /**
+   * 「结束」节点。
+   *
+   * 与「开始」的区别：**开始是固定的**（问卷入口只有一个，位置没有信息量），
+   * 而结束节点允许拖动，位置会写进 layout 的保留键 `__end__`。
+   */
   function renderEnd(model) {
-    const g = s("g", { class: "graph-terminal graph-end" });
-    g.appendChild(
-      s("rect", {
-        x: model.end.x,
-        y: model.end.y,
-        width: 96,
-        height: 34,
-        rx: 17,
-      })
-    );
-    g.appendChild(
-      text("结束", {
-        x: model.end.x + 48,
-        y: model.end.y + 22,
-        "text-anchor": "middle",
-      })
-    );
+    const g = s("g", {
+      class: "graph-terminal graph-end",
+      "data-end": "1",
+      transform: `translate(${model.end.x} ${model.end.y})`,
+    });
+
+    g.appendChild(s("rect", { width: 96, height: 34, rx: 17 }));
+    g.appendChild(text("结束", { x: 48, y: 22, "text-anchor": "middle" }));
+
+    if (opts.canEdit()) {
+      g.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+        e.preventDefault();
+
+        const origin = clientToWorld(e.clientX, e.clientY);
+        const startX = model.end.x;
+        const startY = model.end.y;
+        const dx = startX - origin.x;
+        const dy = startY - origin.y;
+        let moved = false;
+
+        const onMove = (ev) => {
+          const p = clientToWorld(ev.clientX, ev.clientY);
+          const nx = Math.round(p.x + dx);
+          const ny = Math.round(p.y + dy);
+          if (nx === model.end.x && ny === model.end.y) return;
+          moved = true;
+          model.end.x = nx;
+          model.end.y = ny;
+          g.setAttribute("transform", `translate(${nx} ${ny})`);
+        };
+        const onUp = () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          if (moved) queueSave(END_NODE_KEY, model.end.x, model.end.y);
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+      });
+    }
+
     return g;
   }
 
@@ -733,9 +821,12 @@ export function createNodeGraph(opts) {
 
   function clientToWorld(clientX, clientY) {
     const rect = svg.getBoundingClientRect();
+    // 除以 zoom：clientX / rect 都是视觉像素，而 svg 内部坐标是布局像素。
+    // 少了这一步，拖动距离会变成鼠标位移的 1/zoom 倍（不跟手的根因）。
+    const z = uiZoom();
     return {
-      x: (clientX - rect.left - view.tx) / view.k,
-      y: (clientY - rect.top - view.ty) / view.k,
+      x: ((clientX - rect.left) / z - view.tx) / view.k,
+      y: ((clientY - rect.top) / z - view.ty) / view.k,
     };
   }
 
@@ -777,8 +868,9 @@ export function createNodeGraph(opts) {
       let moved = false;
 
       const onMove = (ev) => {
-        const ddx = ev.clientX - start.x;
-        const ddy = ev.clientY - start.y;
+        const z = uiZoom();
+        const ddx = (ev.clientX - start.x) / z;
+        const ddy = (ev.clientY - start.y) / z;
         if (Math.abs(ddx) + Math.abs(ddy) > 3) moved = true;
         view.tx = base.tx + ddx;
         view.ty = base.ty + ddy;
@@ -802,8 +894,9 @@ export function createNodeGraph(opts) {
       (e) => {
         e.preventDefault();
         const rect = svg.getBoundingClientRect();
-        const px = e.clientX - rect.left;
-        const py = e.clientY - rect.top;
+        const z = uiZoom();
+        const px = (e.clientX - rect.left) / z;
+        const py = (e.clientY - rect.top) / z;
 
         const nextK = Math.min(
           2.4,

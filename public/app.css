@@ -1815,17 +1815,24 @@ textarea:focus {
  *   这里把高度除以 0.7 抵回来，让面板仍然铺满视口。
  */
 body.page-editor {
-  zoom: 0.7;
+  /*
+   * 缩放系数只有一个地方定义：这个自定义属性。
+   * 画布的拖动/平移/滚轮会读它来把「视觉像素」换算回「布局像素」
+   * （见 editor-graph.js 的 uiZoom）—— 少了那一步，拖动就会不跟手。
+   * 因此**改缩放只改这一行**，zoom 与 --ui-zoom 必须同源。
+   */
+  --ui-zoom: 0.78;
+  zoom: var(--ui-zoom);
 }
 
 body.page-editor .chat-panel,
 body.page-editor .node-panel {
-  height: calc((100vh - 90px) / 0.7);
+  height: calc((100vh - 90px) / var(--ui-zoom));
 }
 
 /* 中间只剩节点图：给它一个确定高度，否则 SVG 撑不开 */
 body.page-editor .editor-graph {
-  height: calc((100vh - 150px) / 0.7);
+  height: calc((100vh - 150px) / var(--ui-zoom));
   min-height: 560px;
   border-top: none;
   border-radius: var(--radius);

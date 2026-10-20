@@ -34,6 +34,33 @@ export const VALUELESS_OPERATORS: readonly FlowOperator[] = [
 export const SET_OPERATORS: readonly FlowOperator[] = ["in", "not_in"];
 
 /** 结构里参与流程的最小形状（只声明流程关心的字段） */
+/**
+ * 「不连接」的哨兵值：`defaultNext = NO_NEXT`。
+ *
+ * ## 为什么需要它
+ *
+ * `defaultNext` 原本只有三种含义：
+ *   - 省略     → 按题目顺序走下一题（隐式顺序边）
+ *   - `null`   → 本题是终点（画一条线到「结束」节点）
+ *   - 题目 id   → 跳到该题
+ *
+ * 但编辑时还有一种状态是必须表达的：**这条出边就是空的**。
+ * 典型场景：删掉「父题 → 子题」之间的连线后，用户要的是「不连」，
+ * 而不是被悄悄改接成「结束」—— 后者会让图上平白多出一条线。
+ *
+ * 因此新增第四种状态 `NO_NEXT`：不画出边，流程到此结束。
+ * 它与 `null` 的**运行时行为相同**（都结束），区别只在呈现：
+ * `null` 表示「我明确要接到结束节点」，`NO_NEXT` 表示「这里留空」。
+ *
+ * 用 `#` 开头的保留值，是因为题目 id 一律是 `q_<uuid>`，不可能撞上。
+ */
+export const NO_NEXT = "#none";
+
+/** 判断是否为「留空」哨兵 */
+export function isNoNext(value: unknown): boolean {
+  return value === NO_NEXT;
+}
+
 export interface FlowQuestionLike {
   id: string;
   order: number;
@@ -328,6 +355,13 @@ export function resolveFlow(
     }
 
     // 2) defaultNext
+    //    留空（NO_NEXT）与 null 的运行时效果相同：都停止推进。
+    //    区别只在画布上是否画一条线到「结束」节点。
+    if (question.defaultNext === NO_NEXT) {
+      endedBy = "explicit";
+      currentId = undefined;
+      break;
+    }
     if (question.defaultNext === null) {
       endedBy = "explicit";
       currentId = undefined;
@@ -362,6 +396,7 @@ export interface FlowIssue {
  *
  * 检查项（计划 §4.7，其中 V4 / V4b 是 2026-10-19 补的）：
  *   V1  `goTo` / `defaultNext` 指向的题目必须存在（悬空引用）→ 报错
+ *       （`defaultNext === NO_NEXT` 是「留空」哨兵，不参与存在性校验）
  *   V1b 条件引用的题目必须存在 → 报错
  *   **V4  `goTo` / `defaultNext` 只能指向本题之后的题目** → 报错
  *       （所有边同向，保证结构是有向无环图）
@@ -398,7 +433,11 @@ export function checkFlow(schema: FlowSchemaLike): FlowIssue[] {
         }
       });
 
-      if (typeof q.defaultNext === "string" && !index.byId.has(q.defaultNext)) {
+      if (
+        typeof q.defaultNext === "string" &&
+        !isNoNext(q.defaultNext) &&
+        !index.byId.has(q.defaultNext)
+      ) {
         issues.push({
           path: [...base, "defaultNext"],
           message: `默认跳转指向不存在的题目：${q.defaultNext}`,
@@ -445,7 +484,7 @@ export function checkFlow(schema: FlowSchemaLike): FlowIssue[] {
         }
       });
 
-      if (typeof q.defaultNext === "string") {
+      if (typeof q.defaultNext === "string" && !isNoNext(q.defaultNext)) {
         const toPos = position.get(q.defaultNext);
         if (toPos !== undefined && selfPos !== undefined && toPos <= selfPos) {
           issues.push({
@@ -694,7 +733,7 @@ export function findUnreachable(schema: FlowSchemaLike): string[] {
     for (const rule of q.branches ?? []) {
       if (!reachable.has(rule.goTo)) queue.push(rule.goTo);
     }
-    if (typeof q.defaultNext === "string") {
+    if (typeof q.defaultNext === "string" && !isNoNext(q.defaultNext)) {
       if (!reachable.has(q.defaultNext)) queue.push(q.defaultNext);
     } else if (q.defaultNext === undefined) {
       // 都不命中时会按 order 往下走 —— 这条边必须算进去，
